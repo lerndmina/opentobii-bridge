@@ -14,7 +14,7 @@ This repo does not contain a USB driver. It builds on an existing Linux driver f
 | Proof | What it shows | State |
 |---|---|---|
 | 1 | The game's Tobii DLL connects to a Linux listener on `127.0.0.1:4455` under Proton | Passed 2026-11-14, ETS2 with Tobii DLL 7.3.0.14, Proton-CachyOS |
-| 2 | Gaze reaches the game | Not started |
+| 2 | Gaze reaches the game | Responder written; needs a run against a fresh game start |
 | 3 | Head pose reaches the game through a helper in the prefix | Not started |
 | 4 | The helper starts by itself as a service in the prefix | Not started |
 
@@ -25,6 +25,20 @@ python3 proofs/proof1_listen.py 40
 ```
 
 Start it while the game is running. The DLL rescans every 10 seconds. Expected output is an empty discovery connection, then a second connection carrying a 71-byte TTP message with command 1000 (protocol upgrade). The script only logs; it sends nothing and exits after the given number of seconds.
+
+## Proof 2
+
+```sh
+python3 proofs/proof2_replay.py 300
+```
+
+Start it before the game. It answers the DLL with replies recorded from a real tracker (`fixtures/et5`) and replays one recorded gaze frame at 30 Hz once the DLL subscribes. The DLL tries to open the device once per game run, so a responder started after a failed attempt only sees discovery probes.
+
+## Tests
+
+```sh
+python3 -m unittest discover -s tests
+```
 
 ## Licence
 
