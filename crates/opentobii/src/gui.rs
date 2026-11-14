@@ -16,7 +16,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::steam;
-use crate::{prefix, service};
+use crate::{install, prefix, service, update};
 use opentobii_core::config::Config;
 use opentobii_core::control::{self, Line, RawPose, Request, Status};
 use opentobii_core::overlay::{self, Overlay, Style};
@@ -59,6 +59,10 @@ enum Event {
     Calibration(Option<Calibration>),
     /// The calibration tool finished, with what to tell the user.
     Calibrated(String),
+    /// A newer release exists.
+    UpdateAvailable(Box<update::Release>),
+    /// An update finished; what to tell the user, or why it failed.
+    UpdateDone(Result<String, String>),
     /// What systemd says about the daemon.
     Service(service::State),
     /// A start, stop or autostart change finished; an error if it failed.
@@ -265,6 +269,25 @@ fn service_summary(service: service::State, connected: bool) -> String {
     }
 }
 
+/// The first few non-empty lines of some release notes, for the banner.
+fn first_lines(notes: &str, count: usize) -> String {
+    let lines: Vec<&str> = notes
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let mut shown = lines
+        .iter()
+        .take(count)
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n");
+    if lines.len() > count {
+        shown.push_str("\n…");
+    }
+    shown
+}
+
 // --- pure helpers, tested without a window ---------------------------------
 
 /// Steadiness slider (0 to 100) to the filter's cutoff at rest, Hz: 3 Hz at
@@ -433,6 +456,9 @@ struct Ui {
     failure: Option<String>,
     calibration: Option<Calibration>,
     calibration_note: String,
+    update: Option<update::Release>,
+    update_busy: bool,
+    update_result: Option<String>,
     service: service::State,
     service_busy: bool,
     games: Vec<GameInfo>,
@@ -610,6 +636,59 @@ impl Ui {
         self.refresh_calibration(false);
         let events = self.events.clone();
         thread::spawn(move || run_calibration(monitor, keep, &events));
+    }
+
+    /// The update banner.
+    fn refresh_update(&self) {
+        let app = &self.app;
+        app.set_update_busy(self.update_busy);
+        if let Some(done) = &self.update_result {
+            app.set_update_text(done.as_str().into());
+            app.set_update_notes(
+                "Close this window and open it again to use the new version.".into(),
+            );
+            app.set_update_possible(false);
+            return;
+        }
+        let Some(release) = &self.update else {
+            app.set_update_text("".into());
+            app.set_update_notes("".into());
+            return;
+        };
+        app.set_update_text(
+            format!(
+                "opentobii {} is available. You have {}.",
+                release.version,
+                update::current()
+            )
+            .into(),
+        );
+        // A package-managed or loose copy cannot update itself: say how.
+        let refusal = install::kind().ok().and_then(|kind| update::refusal(&kind));
+        app.set_update_possible(refusal.is_none());
+        let notes = match refusal {
+            Some(reason) => format!("This copy does not update itself: {reason}."),
+            None => first_lines(&release.notes, 4),
+        };
+        app.set_update_notes(notes.into());
+    }
+
+    fn update_now(&mut self) {
+        let Some(release) = self.update.clone() else {
+            return;
+        };
+        if self.update_busy {
+            return;
+        }
+        self.update_busy = true;
+        self.refresh_update();
+        let events = self.events.clone();
+        thread::spawn(move || {
+            let _ = events.send(Event::UpdateDone(update::install_release(
+                &update::Http,
+                &release,
+            )));
+        });
     }
 
     /// The Daemon card.
@@ -881,6 +960,19 @@ impl Ui {
                 self.calibration = calibration;
                 self.refresh_calibration(true);
             }
+            Event::UpdateAvailable(release) => {
+                self.update = Some(*release);
+                self.refresh_update();
+            }
+            Event::UpdateDone(result) => {
+                self.update_busy = false;
+                match result {
+                    Ok(message) => self.update_result = Some(message),
+                    Err(reason) => self.failure = Some(format!("Update failed: {reason}")),
+                }
+                self.refresh_update();
+                self.refresh_chrome();
+            }
             Event::Service(state) => {
                 self.service = state;
                 self.refresh_service();
@@ -1033,6 +1125,22 @@ pub fn run() -> Result<(), String> {
             let _ = events.send(Event::Calibration(read_calibration()));
         }
     });
+    // Look for a newer release once, unless the settings say not to. Nothing
+    // about the user or the tracker is sent: it is a plain request for the
+    // project's release list.
+    thread::spawn({
+        let events = event_tx.clone();
+        move || {
+            let allowed = opentobii_core::config::default_path()
+                .and_then(|path| Config::load(&path).ok())
+                .is_none_or(|config| config.updates.check);
+            if allowed {
+                if let Ok(Some(release)) = update::newer_release(&update::Http, update::current()) {
+                    let _ = events.send(Event::UpdateAvailable(Box::new(release)));
+                }
+            }
+        }
+    });
     // Keep the Daemon and Games cards current: both can change behind the
     // window's back.
     thread::spawn({
@@ -1085,6 +1193,9 @@ pub fn run() -> Result<(), String> {
         failure: None,
         calibration: None,
         calibration_note: String::new(),
+        update: None,
+        update_busy: false,
+        update_result: None,
         service: service::State::default(),
         service_busy: false,
         games: Vec::new(),
@@ -1352,6 +1463,15 @@ pub fn run() -> Result<(), String> {
             }
         }
     });
+    app.set_version_text(format!("Version {}", update::current()).into());
+    app.on_update_now({
+        let ui = Rc::clone(&ui);
+        move || {
+            if let Ok(mut ui) = ui.try_borrow_mut() {
+                ui.update_now();
+            }
+        }
+    });
     app.on_calibrate({
         let ui = Rc::clone(&ui);
         move || {
@@ -1459,6 +1579,13 @@ mod tests {
             helper_current,
             in_use,
         }))
+    }
+
+    #[test]
+    fn release_notes_are_cut_to_a_few_lines_for_the_banner() {
+        assert_eq!(first_lines("One\n\n  Two  \nThree", 4), "One\nTwo\nThree");
+        assert_eq!(first_lines("1\n2\n3\n4\n5", 2), "1\n2\n…");
+        assert_eq!(first_lines("", 3), "");
     }
 
     #[test]

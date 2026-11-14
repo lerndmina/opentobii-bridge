@@ -369,6 +369,11 @@ export component App inherits Window {
     in property <string> game-text: "No game";
     in property <bool> game-connected;
     in property <string> notice;
+    in property <string> version-text;
+    in property <string> update-text;
+    in property <string> update-notes;
+    in property <bool> update-busy;
+    in property <bool> update-possible;
 
     in property <[string]> profiles;
     in-out property <int> profile-index;
@@ -430,6 +435,7 @@ export component App inherits Window {
     callback reset-profile();
     callback recentre();
     callback calibrate();
+    callback update-now();
     callback service-start();
     callback service-stop();
     callback service-restart();
@@ -476,6 +482,12 @@ export component App inherits Window {
                     horizontal-alignment: center;
                     wrap: word-wrap;
                 }
+                Text {
+                    text: root.version-text;
+                    color: Theme.muted;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                }
                 AboutSlint { }
             }
         }
@@ -517,6 +529,46 @@ export component App inherits Window {
                 text: "About";
                 clicked => {
                     about.show();
+                }
+            }
+        }
+
+        if root.update-text != "": Rectangle {
+            border-radius: 8px;
+            background: #60cdff1c;
+            border-width: 1px;
+            border-color: #60cdff66;
+            VerticalLayout {
+                padding-left: 14px;
+                padding-right: 6px;
+                padding-top: 6px;
+                padding-bottom: 6px;
+                spacing: 4px;
+                HorizontalLayout {
+                    spacing: 10px;
+                    Text {
+                        text: root.update-text;
+                        color: Theme.text;
+                        font-size: 13px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                    }
+                    if root.update-possible: Button {
+                        text: root.update-busy ? "Updating…" : "Update";
+                        primary: true;
+                        enabled: !root.update-busy;
+                        clicked => {
+                            root.update-now();
+                        }
+                    }
+                }
+                if root.update-notes != "": Text {
+                    text: root.update-notes;
+                    color: Theme.muted;
+                    font-size: 12px;
+                    wrap: word-wrap;
                 }
             }
         }

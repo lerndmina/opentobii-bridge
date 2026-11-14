@@ -13,6 +13,7 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 
 use crate::install::{self, Kind, Layout};
+use crate::service;
 
 /// The project's release-signing key. Its secret half signs each release's
 /// checksum list.
@@ -291,6 +292,42 @@ pub fn refusal(kind: &Kind) -> Option<String> {
             "this copy is not installed; run `opentobii setup` first, and the installed copy can update itself"
                 .to_owned(),
         ),
+    }
+}
+
+/// Install `release` over this user's installed copy and bring the daemon
+/// up on it, going back to the previous version if the daemon will not
+/// start. Returns a sentence saying what happened.
+pub fn install_release(fetch: &impl Fetch, release: &Release) -> Result<String, String> {
+    if let Some(reason) = refusal(&install::kind()?) {
+        return Err(reason);
+    }
+    let layout = Layout::for_user()?;
+    let program = download_verified(fetch, release, PUBLIC_KEY)?;
+    let was_running = service::state().active;
+    swap(&program, &layout.binary)?;
+    if !was_running {
+        return Ok(format!(
+            "Installed opentobii {}. The daemon will use it when started.",
+            release.version
+        ));
+    }
+    let started = service::restart().is_ok() && {
+        std::thread::sleep(Duration::from_millis(1500));
+        service::state().active
+    };
+    if started {
+        Ok(format!(
+            "Installed opentobii {} and restarted the daemon on it.",
+            release.version
+        ))
+    } else {
+        roll_back(&layout.binary)?;
+        let _ = service::restart();
+        Err(format!(
+            "the daemon did not start on {}, so the previous version was put back",
+            release.version
+        ))
     }
 }
 

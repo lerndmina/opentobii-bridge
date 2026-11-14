@@ -336,35 +336,8 @@ fn update_command(mut args: impl Iterator<Item = String>) -> CommandResult {
     if check_only {
         return Ok(());
     }
-    if let Some(reason) = update::refusal(&install::kind()?) {
-        return Err(reason);
-    }
-    let layout = install::Layout::for_user()?;
     println!("Downloading and checking the release's signature...");
-    let program = update::download_verified(&fetch, &release, update::PUBLIC_KEY)?;
-    let was_running = service::state().active;
-    update::swap(&program, &layout.binary)?;
-    println!("Installed opentobii {}.", release.version);
-    if was_running {
-        // Bring the daemon up on the new version, and go back if it will
-        // not start.
-        let started = service::restart().is_ok() && {
-            std::thread::sleep(Duration::from_millis(1500));
-            service::state().active
-        };
-        if started {
-            println!("The daemon was restarted on the new version.");
-        } else {
-            update::roll_back(&layout.binary)?;
-            let _ = service::restart();
-            return Err(format!(
-                "the daemon did not start on {}, so the previous version was put back",
-                release.version
-            ));
-        }
-    } else {
-        println!("The daemon was not running; it will use the new version when started.");
-    }
+    println!("{}", update::install_release(&fetch, &release)?);
     Ok(())
 }
 
