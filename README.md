@@ -23,26 +23,35 @@ Not yet done: gaze features in the game, tuning of the head pose smoothing, and 
 
 ## Install
 
-opentobii needs the tracker's driver, [Skyggedans/tobii-linux](https://github.com/Skyggedans/tobii-linux), installed and calibrated first. Then take one of these from the [releases page](https://github.com/lerndmina/opentobii-bridge/releases):
+opentobii needs the tracker's driver, [Skyggedans/tobii-linux](https://github.com/Skyggedans/tobii-linux), installed and calibrated first.
 
-| File | For | Install |
-|---|---|---|
-| `opentobii-<version>-1.x86_64.rpm` | Fedora, openSUSE | `sudo dnf install ./opentobii-*.rpm` |
-| `opentobii_<version>-1_amd64.deb` | Debian, Ubuntu, Mint | `sudo apt install ./opentobii_*.deb` |
-| `opentobii-<version>-x86_64-linux.tar.gz` | Anything else, or no root | unpack, then `./install.sh` |
-
-`SHA256SUMS` lists the checksum of each. The tarball's `install.sh` copies everything into your home folder and `uninstall.sh` takes it out again.
-
-Then:
+Then download `opentobii-<version>-x86_64-linux` from the [latest release](https://github.com/lerndmina/opentobii-bridge/releases/latest) and let it install itself. No root is needed:
 
 ```sh
-systemctl --user enable --now opentobii   # start the daemon now and at login
-opentobii games                           # games that can use the tracker
-opentobii install <app id or name>        # with that game closed
-opentobii gui                             # tune it
+chmod +x opentobii-*-x86_64-linux
+./opentobii-*-x86_64-linux setup --autostart
 ```
 
-In the game, switch eye tracking on in its options if it has such a switch.
+That copies the program to `~/.local/bin`, adds it to your app menu, and starts the background daemon now and at every login. Open **opentobii** from the app menu, or run `opentobii gui`: a Getting started list walks through what is left, including setting up a game. In the game, switch eye tracking on in its options if it has such a switch.
+
+### Updating
+
+A copy installed this way updates itself. The tuning window shows a banner when a newer release exists, with an Update button; `opentobii update` does the same from a terminal. Every release is signed, and an update is refused unless its signature matches the key built into the program (`packaging/update-key.pub`). To stop the window checking, put this in `~/.config/opentobii/config.toml`:
+
+```toml
+[updates]
+check = false
+```
+
+`opentobii remove` takes the install out again and keeps your settings.
+
+### Packages
+
+The release also carries an rpm, a deb and a tarball with an `install.sh`, for people who prefer them. `SHA256SUMS` lists the checksum of each file and `SHA256SUMS.minisig` signs that list. A packaged copy lives under `/usr` and does not update itself: download the newer package instead.
+
+### Gaze overlay
+
+The tuning window's Gaze overlay card switches on a mark that shows where you are looking, with a short trail behind it, drawn above everything including a full-screen game. Style (Bubble, Solid, Heatmap), colour, size, opacity, smoothing and trail are adjustable. It needs a Wayland desktop with the layer-shell protocol: KDE Plasma, Sway, Hyprland or COSMIC. Screen-capture software only shows it when capturing the whole screen.
 
 ## The daemon
 

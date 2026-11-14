@@ -63,6 +63,10 @@ enum Event {
     UpdateAvailable(Box<update::Release>),
     /// An update finished; what to tell the user, or why it failed.
     UpdateDone(Result<String, String>),
+    /// Installing for this user finished.
+    Installed(Result<(), String>),
+    /// Whether the driver's daemon program is on this system.
+    Driver(bool),
     /// What systemd says about the daemon.
     Service(service::State),
     /// A start, stop or autostart change finished; an error if it failed.
@@ -183,6 +187,103 @@ fn run_calibration(monitor: Option<String>, keep_display_setup: bool, events: &S
     };
     let _ = events.send(Event::Calibrated(message));
     let _ = events.send(Event::Calibration(read_calibration()));
+}
+
+// --- getting started -----------------------------------------------------------
+
+/// What the checklist is worked out from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct Readiness {
+    driver_installed: bool,
+    calibrated: bool,
+    installed: bool,
+    daemon_running: bool,
+    can_start: bool,
+    game_set_up: bool,
+    any_game: bool,
+    installing: bool,
+    starting: bool,
+}
+
+const CHECK_INSTALL: usize = 2;
+const CHECK_DAEMON: usize = 3;
+
+/// The steps from nothing to a working setup, in the order they have to
+/// happen. Each is done or not, and says what to do when it is not.
+fn checklist(ready: Readiness) -> Vec<CheckRow> {
+    let row = |text: &str, detail: &str, done: bool, action: &str, busy: bool| CheckRow {
+        text: text.into(),
+        detail: detail.into(),
+        done,
+        action: action.into(),
+        busy,
+    };
+    vec![
+        row(
+            "The tracker's driver is installed",
+            "opentobii needs the tobii-linux driver from github.com/Skyggedans/tobii-linux. Install it, then plug the tracker in again.",
+            ready.driver_installed,
+            "",
+            false,
+        ),
+        row(
+            "The tracker is calibrated to your screen and eyes",
+            "Use the Calibration card below.",
+            ready.calibrated,
+            "",
+            false,
+        ),
+        row(
+            "opentobii is installed for your user",
+            "Copies this program to ~/.local/bin and adds it to your app menu. No root needed. An installed copy can update itself.",
+            ready.installed,
+            "Install",
+            ready.installing,
+        ),
+        row(
+            "The daemon is running",
+            if ready.can_start { "" } else { "Start it in a terminal with: opentobii daemon" },
+            ready.daemon_running,
+            if ready.can_start { "Start" } else { "" },
+            ready.starting,
+        ),
+        row(
+            "A game is set up",
+            if ready.any_game {
+                "Use the Games card below, with the game closed. Then switch eye tracking on in the game's options."
+            } else {
+                "No installed Steam game with Tobii support was found yet."
+            },
+            ready.game_set_up,
+            "",
+            false,
+        ),
+    ]
+}
+
+fn home_copy_exists() -> bool {
+    install::Layout::for_user().is_ok_and(|layout| layout.binary.is_file())
+}
+
+/// What `opentobii setup` does, for the Install button.
+fn install_for_user() -> Result<(), String> {
+    let layout = install::Layout::for_user()?;
+    let exe = std::env::current_exe()
+        .map_err(|err| format!("cannot find this program's own path: {err}"))?;
+    install::place(&exe, &layout)?;
+    if service::state().systemd {
+        // The unit file is new or changed: have systemd read it.
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "daemon-reload"])
+            .status();
+    }
+    Ok(())
+}
+
+fn driver_present() -> bool {
+    std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|folder| folder.join("tobiid").is_file())
+    })
 }
 
 // --- games --------------------------------------------------------------------
@@ -456,6 +557,10 @@ struct Ui {
     failure: Option<String>,
     calibration: Option<Calibration>,
     calibration_note: String,
+    driver_installed: bool,
+    home_installed: bool,
+    installing: bool,
+    check_rows: Rc<VecModel<CheckRow>>,
     update: Option<update::Release>,
     update_busy: bool,
     update_result: Option<String>,
@@ -577,6 +682,7 @@ impl Ui {
 
     fn refresh_all(&mut self) {
         self.refresh_chrome();
+        self.refresh_checklist();
         self.refresh_service();
         self.refresh_overlay();
         self.refresh_settings();
@@ -636,6 +742,57 @@ impl Ui {
         self.refresh_calibration(false);
         let events = self.events.clone();
         thread::spawn(move || run_calibration(monitor, keep, &events));
+    }
+
+    /// The Getting started card. It goes away once everything is done.
+    fn refresh_checklist(&self) {
+        let ready = Readiness {
+            driver_installed: self.driver_installed,
+            calibrated: self
+                .calibration
+                .as_ref()
+                .is_some_and(|c| c.summary.contains("Calibration: yours")),
+            installed: self.home_installed
+                || matches!(
+                    install::kind(),
+                    Ok(install::Kind::Home | install::Kind::Packaged)
+                ),
+            daemon_running: self.connected,
+            can_start: self.service.systemd,
+            game_set_up: self.games.iter().any(
+                |game| matches!(&game.helper, Some(Ok(found)) if found.service_key && found.helper),
+            ),
+            any_game: !self.games.is_empty(),
+            installing: self.installing,
+            starting: self.service_busy,
+        };
+        let rows = checklist(ready);
+        self.app
+            .set_checklist_visible(rows.iter().any(|row| !row.done));
+        if self.check_rows.row_count() == rows.len() {
+            for (index, row) in rows.into_iter().enumerate() {
+                if self.check_rows.row_data(index).as_ref() != Some(&row) {
+                    self.check_rows.set_row_data(index, row);
+                }
+            }
+        } else {
+            self.check_rows.set_vec(rows);
+        }
+    }
+
+    fn checklist_action(&mut self, index: usize) {
+        match index {
+            CHECK_DAEMON => self.change_service(service::start),
+            CHECK_INSTALL if !self.installing => {
+                self.installing = true;
+                self.refresh_checklist();
+                let events = self.events.clone();
+                thread::spawn(move || {
+                    let _ = events.send(Event::Installed(install_for_user()));
+                });
+            }
+            _ => {}
+        }
     }
 
     /// The update banner.
@@ -699,6 +856,7 @@ impl Ui {
         app.set_service_enabled(self.service.enabled);
         app.set_service_busy(self.service_busy);
         app.set_service_text(service_summary(self.service, self.connected).into());
+        self.refresh_checklist();
     }
 
     /// The Games card.
@@ -959,6 +1117,7 @@ impl Ui {
             Event::Calibration(calibration) => {
                 self.calibration = calibration;
                 self.refresh_calibration(true);
+                self.refresh_checklist();
             }
             Event::UpdateAvailable(release) => {
                 self.update = Some(*release);
@@ -971,6 +1130,19 @@ impl Ui {
                     Err(reason) => self.failure = Some(format!("Update failed: {reason}")),
                 }
                 self.refresh_update();
+                self.refresh_chrome();
+            }
+            Event::Driver(present) => {
+                self.driver_installed = present;
+                self.refresh_checklist();
+            }
+            Event::Installed(result) => {
+                self.installing = false;
+                match result {
+                    Ok(()) => self.home_installed = true,
+                    Err(reason) => self.failure = Some(format!("Install failed: {reason}")),
+                }
+                self.refresh_checklist();
                 self.refresh_chrome();
             }
             Event::Service(state) => {
@@ -987,6 +1159,7 @@ impl Ui {
             Event::Games(games) => {
                 self.games = games;
                 self.refresh_games();
+                self.refresh_checklist();
             }
             Event::GameDone(app_id, result) => {
                 self.games_busy.retain(|id| *id != app_id);
@@ -1141,6 +1314,12 @@ pub fn run() -> Result<(), String> {
             }
         }
     });
+    thread::spawn({
+        let events = event_tx.clone();
+        move || {
+            let _ = events.send(Event::Driver(driver_present()));
+        }
+    });
     // Keep the Daemon and Games cards current: both can change behind the
     // window's back.
     thread::spawn({
@@ -1178,6 +1357,8 @@ pub fn run() -> Result<(), String> {
     app.set_rotation(ModelRc::from(Rc::clone(&rotation)));
     app.set_position(ModelRc::from(Rc::clone(&position)));
 
+    let check_rows: Rc<VecModel<CheckRow>> = Rc::new(VecModel::default());
+    app.set_checklist(ModelRc::from(Rc::clone(&check_rows)));
     let game_rows: Rc<VecModel<GameRow>> = Rc::new(VecModel::default());
     app.set_games(ModelRc::from(Rc::clone(&game_rows)));
 
@@ -1193,6 +1374,10 @@ pub fn run() -> Result<(), String> {
         failure: None,
         calibration: None,
         calibration_note: String::new(),
+        driver_installed: false,
+        home_installed: home_copy_exists(),
+        installing: false,
+        check_rows: Rc::clone(&check_rows),
         update: None,
         update_busy: false,
         update_result: None,
@@ -1472,6 +1657,14 @@ pub fn run() -> Result<(), String> {
             }
         }
     });
+    app.on_checklist_action({
+        let ui = Rc::clone(&ui);
+        move |index| {
+            if let (Ok(mut ui), Ok(index)) = (ui.try_borrow_mut(), usize::try_from(index)) {
+                ui.checklist_action(index);
+            }
+        }
+    });
     app.on_calibrate({
         let ui = Rc::clone(&ui);
         move || {
@@ -1579,6 +1772,47 @@ mod tests {
             helper_current,
             in_use,
         }))
+    }
+
+    #[test]
+    fn the_checklist_lists_the_steps_in_order_with_the_right_buttons() {
+        let nothing = checklist(Readiness {
+            can_start: true,
+            ..Readiness::default()
+        });
+        assert_eq!(nothing.len(), 5);
+        assert!(nothing.iter().all(|row| !row.done));
+        assert_eq!(nothing[CHECK_INSTALL].action, "Install");
+        assert_eq!(nothing[CHECK_DAEMON].action, "Start");
+        assert!(nothing[0].action.is_empty() && nothing[0].detail.contains("tobii-linux"));
+        assert!(nothing[4].detail.contains("No installed Steam game"));
+
+        let all = checklist(Readiness {
+            driver_installed: true,
+            calibrated: true,
+            installed: true,
+            daemon_running: true,
+            can_start: true,
+            game_set_up: true,
+            any_game: true,
+            installing: false,
+            starting: false,
+        });
+        assert!(all.iter().all(|row| row.done));
+    }
+
+    #[test]
+    fn without_systemd_the_daemon_step_says_how_to_start_it_by_hand() {
+        let rows = checklist(Readiness::default());
+        assert!(rows[CHECK_DAEMON].action.is_empty());
+        assert!(rows[CHECK_DAEMON].detail.contains("opentobii daemon"));
+        let busy = checklist(Readiness {
+            can_start: true,
+            starting: true,
+            installing: true,
+            ..Readiness::default()
+        });
+        assert!(busy[CHECK_DAEMON].busy && busy[CHECK_INSTALL].busy);
     }
 
     #[test]

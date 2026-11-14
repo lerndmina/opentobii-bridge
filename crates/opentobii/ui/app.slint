@@ -19,6 +19,15 @@ global Theme {
     out property <length> radius: 10px;
 }
 
+export struct CheckRow {
+    text: string,
+    detail: string,
+    done: bool,
+    // The label of the button that fixes it, or empty for none.
+    action: string,
+    busy: bool,
+}
+
 export struct GameRow {
     name: string,
     state: string,
@@ -399,6 +408,9 @@ export component App inherits Window {
     in property <float> look-roll;
     in property <string> look-range-text;
 
+    in property <[CheckRow]> checklist;
+    in property <bool> checklist-visible;
+
     in property <string> service-text;
     in property <bool> service-available;
     in property <bool> service-active;
@@ -435,6 +447,7 @@ export component App inherits Window {
     callback reset-profile();
     callback recentre();
     callback calibrate();
+    callback checklist-action(int);
     callback update-now();
     callback service-start();
     callback service-stop();
@@ -612,6 +625,53 @@ export component App inherits Window {
                 VerticalLayout {
                     spacing: 14px;
                     padding-right: 14px;
+
+                    if root.checklist-visible: Card {
+                        title: "Getting started";
+                        hint: "";
+                        vertical-stretch: 0;
+                        for item[i] in root.checklist: HorizontalLayout {
+                            spacing: 10px;
+                            VerticalLayout {
+                                alignment: start;
+                                padding-top: 3px;
+                                Rectangle {
+                                    width: 14px;
+                                    height: 14px;
+                                    border-radius: 7px;
+                                    background: item.done ? Theme.good : transparent;
+                                    border-width: 2px;
+                                    border-color: item.done ? Theme.good : Theme.idle;
+                                }
+                            }
+                            VerticalLayout {
+                                spacing: 4px;
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: item.text;
+                                    color: item.done ? Theme.muted : Theme.text;
+                                    font-size: 13px;
+                                    wrap: word-wrap;
+                                }
+                                if !item.done && item.detail != "": Text {
+                                    text: item.detail;
+                                    color: Theme.muted;
+                                    font-size: 12px;
+                                    wrap: word-wrap;
+                                }
+                                if !item.done && item.action != "": HorizontalLayout {
+                                    alignment: start;
+                                    Button {
+                                        text: item.action;
+                                        enabled: !item.busy;
+                                        clicked => {
+                                            root.checklist-action(i);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     Card {
                         title: "Live view";
