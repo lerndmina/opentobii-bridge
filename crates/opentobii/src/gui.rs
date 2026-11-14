@@ -23,6 +23,11 @@ use opentobii_core::overlay::{self, Overlay, Style};
 use opentobii_core::pipeline::{Axis, Neutral, Pipeline, Pose, Profile};
 use slint::{ComponentHandle, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
+/// How often an open window looks for a newer release.
+const CHECK_EVERY: Duration = Duration::from_secs(60 * 60);
+/// How soon it looks again after a look that failed.
+const CHECK_RETRY: Duration = Duration::from_secs(5 * 60);
+
 slint::include_modules!();
 
 const RETRY_EVERY: Duration = Duration::from_secs(2);
@@ -59,8 +64,9 @@ enum Event {
     Calibration(Option<Calibration>),
     /// The calibration tool finished, with what to tell the user.
     Calibrated(String),
-    /// A newer release exists.
-    UpdateAvailable(Box<update::Release>),
+    /// A look for a newer release finished: the release if there is one, or
+    /// why the look failed.
+    UpdateChecked(Result<Option<Box<update::Release>>, String>),
     /// An update finished; what to tell the user, or why it failed.
     UpdateDone(Result<String, String>),
     /// Installing for this user finished.
@@ -372,15 +378,23 @@ fn service_summary(service: service::State, connected: bool) -> String {
 
 /// The first few non-empty lines of some release notes, for the banner.
 fn first_lines(notes: &str, count: usize) -> String {
-    let lines: Vec<&str> = notes
+    // Release notes are written in Markdown; the banner shows plain text.
+    let lines: Vec<String> = notes
         .lines()
-        .map(str::trim)
+        .map(|line| {
+            let line = line.trim().trim_start_matches('#').trim_start();
+            let line = match line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+                Some(item) => format!("• {item}"),
+                None => line.to_owned(),
+            };
+            line.replace("**", "").replace('`', "")
+        })
         .filter(|line| !line.is_empty())
         .collect();
     let mut shown = lines
         .iter()
         .take(count)
-        .copied()
+        .map(String::as_str)
         .collect::<Vec<_>>()
         .join("\n");
     if lines.len() > count {
@@ -564,6 +578,11 @@ struct Ui {
     update: Option<update::Release>,
     update_busy: bool,
     update_result: Option<String>,
+    /// How the last look for a release went, for the About box.
+    update_status: String,
+    update_checking: bool,
+    /// Asks the checking thread to look now.
+    check_now: Sender<()>,
     service: service::State,
     service_busy: bool,
     games: Vec<GameInfo>,
@@ -799,6 +818,12 @@ impl Ui {
     fn refresh_update(&self) {
         let app = &self.app;
         app.set_update_busy(self.update_busy);
+        app.set_update_checking(self.update_checking);
+        app.set_update_status(if self.update_checking {
+            "Checking for updates…".into()
+        } else {
+            self.update_status.as_str().into()
+        });
         if let Some(done) = &self.update_result {
             app.set_update_text(done.as_str().into());
             app.set_update_notes(
@@ -828,6 +853,15 @@ impl Ui {
             None => first_lines(&release.notes, 4),
         };
         app.set_update_notes(notes.into());
+    }
+
+    /// Look for a newer release now, as asked from the About box.
+    fn check_for_updates(&mut self) {
+        if self.update_checking || self.check_now.send(()).is_err() {
+            return;
+        }
+        self.update_checking = true;
+        self.refresh_update();
     }
 
     fn update_now(&mut self) {
@@ -1119,8 +1153,23 @@ impl Ui {
                 self.refresh_calibration(true);
                 self.refresh_checklist();
             }
-            Event::UpdateAvailable(release) => {
-                self.update = Some(*release);
+            Event::UpdateChecked(found) => {
+                self.update_checking = false;
+                match found {
+                    Ok(Some(release)) => {
+                        self.update_status = format!("Version {} is available.", release.version);
+                        self.update = Some(*release);
+                    }
+                    Ok(None) => {
+                        self.update_status = "You have the latest version.".to_owned();
+                        self.update = None;
+                    }
+                    // Keep showing a release found earlier: one failed look
+                    // does not make it go away.
+                    Err(reason) => {
+                        self.update_status = format!("Could not check for updates: {reason}");
+                    }
+                }
                 self.refresh_update();
             }
             Event::UpdateDone(result) => {
@@ -1298,19 +1347,36 @@ pub fn run() -> Result<(), String> {
             let _ = events.send(Event::Calibration(read_calibration()));
         }
     });
-    // Look for a newer release once, unless the settings say not to. Nothing
-    // about the user or the tracker is sent: it is a plain request for the
-    // project's release list.
+    // Look for a newer release when the window opens and every so often
+    // after, unless the settings say not to, and whenever the About box
+    // asks. A window left open for days still hears about a release.
+    // Nothing about the user or the tracker is sent: it is a plain request
+    // for the project's release list.
+    let (check_now, check_asked) = mpsc::channel::<()>();
     thread::spawn({
         let events = event_tx.clone();
         move || {
-            let allowed = opentobii_core::config::default_path()
+            let automatic = opentobii_core::config::default_path()
                 .and_then(|path| Config::load(&path).ok())
                 .is_none_or(|config| config.updates.check);
-            if allowed {
-                if let Ok(Some(release)) = update::newer_release(&update::Http, update::current()) {
-                    let _ = events.send(Event::UpdateAvailable(Box::new(release)));
+            let mut look = automatic;
+            loop {
+                let mut wait = CHECK_EVERY;
+                if look {
+                    let found = update::newer_release(&update::Http, update::current())
+                        .map(|release| release.map(Box::new));
+                    if found.is_err() {
+                        wait = CHECK_RETRY;
+                    }
+                    if events.send(Event::UpdateChecked(found)).is_err() {
+                        return;
+                    }
                 }
+                look = match check_asked.recv_timeout(wait) {
+                    Ok(()) => true,
+                    Err(mpsc::RecvTimeoutError::Timeout) => automatic,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                };
             }
         }
     });
@@ -1381,6 +1447,9 @@ pub fn run() -> Result<(), String> {
         update: None,
         update_busy: false,
         update_result: None,
+        update_status: String::new(),
+        update_checking: false,
+        check_now,
         service: service::State::default(),
         service_busy: false,
         games: Vec::new(),
@@ -1649,6 +1718,14 @@ pub fn run() -> Result<(), String> {
         }
     });
     app.set_version_text(format!("Version {}", update::current()).into());
+    app.on_check_updates({
+        let ui = Rc::clone(&ui);
+        move || {
+            if let Ok(mut ui) = ui.try_borrow_mut() {
+                ui.check_for_updates();
+            }
+        }
+    });
     app.on_update_now({
         let ui = Rc::clone(&ui);
         move || {
@@ -1820,6 +1897,13 @@ mod tests {
         assert_eq!(first_lines("One\n\n  Two  \nThree", 4), "One\nTwo\nThree");
         assert_eq!(first_lines("1\n2\n3\n4\n5", 2), "1\n2\n…");
         assert_eq!(first_lines("", 3), "");
+        assert_eq!(
+            first_lines(
+                "## Fixed\n\n- The `Update` banner\n**Full Changelog**: x",
+                4
+            ),
+            "Fixed\n• The Update banner\nFull Changelog: x"
+        );
     }
 
     #[test]

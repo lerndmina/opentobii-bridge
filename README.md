@@ -36,7 +36,7 @@ That copies the program to `~/.local/bin`, adds it to your app menu, and starts 
 
 ### Updating
 
-A copy installed this way updates itself. The tuning window shows a banner when a newer release exists, with an Update button; `opentobii update` does the same from a terminal. Every release is signed, and an update is refused unless its signature matches the key built into the program (`packaging/update-key.pub`). To stop the window checking, put this in `~/.config/opentobii/config.toml`:
+A copy installed this way updates itself. The tuning window looks for a newer release when it opens and every hour after, and shows a banner with an Update button when there is one; its About box has a "Check for updates" button too; `opentobii update` does the same from a terminal. Every release is signed, and an update is refused unless its signature matches the key built into the program (`packaging/update-key.pub`). To stop the window checking, put this in `~/.config/opentobii/config.toml`:
 
 ```toml
 [updates]

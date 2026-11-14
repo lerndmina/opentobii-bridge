@@ -383,6 +383,8 @@ export component App inherits Window {
     in property <string> update-notes;
     in property <bool> update-busy;
     in property <bool> update-possible;
+    in property <string> update-status;
+    in property <bool> update-checking;
 
     in property <[string]> profiles;
     in-out property <int> profile-index;
@@ -449,6 +451,7 @@ export component App inherits Window {
     callback calibrate();
     callback checklist-action(int);
     callback update-now();
+    callback check-updates();
     callback service-start();
     callback service-stop();
     callback service-restart();
@@ -470,9 +473,11 @@ export component App inherits Window {
 
     about := PopupWindow {
         x: (root.width - 320px) / 2;
-        y: (root.height - 260px) / 2;
+        y: (root.height - 330px) / 2;
         width: 320px;
-        height: 260px;
+        height: 330px;
+        // A click on the button inside must not close the box.
+        close-policy: PopupClosePolicy.close-on-click-outside;
         Rectangle {
             background: Theme.card;
             border-radius: Theme.radius;
@@ -500,6 +505,20 @@ export component App inherits Window {
                     color: Theme.muted;
                     font-size: 12px;
                     horizontal-alignment: center;
+                }
+                Text {
+                    text: root.update-status;
+                    color: Theme.muted;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+                Button {
+                    text: "Check for updates";
+                    enabled: !root.update-checking;
+                    clicked => {
+                        root.check-updates();
+                    }
                 }
                 AboutSlint { }
             }
