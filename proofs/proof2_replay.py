@@ -67,6 +67,7 @@ def load(name: str) -> ttp.Message:
 class Replay:
     def __init__(self, clock: str) -> None:
         self.clock = clock
+        self.offset_micros: int | None = None
         self.replies = {cmd: load(name).payload for cmd, name in RECORDED.items()}
         self.gaze = load("session1-gaze-frame")
         self.presence = load("init-presence")
@@ -75,6 +76,10 @@ class Replay:
         self.commands: dict[int, int] = {}
 
     def stamp(self, body: bytes) -> bytes:
+        if self.offset_micros is not None:
+            # The helper told us the game's counter; follow that clock.
+            raw = time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW) // 1000
+            return ttp.with_timestamp(body, raw + self.offset_micros)
         if self.clock == "device":
             return body
         micros = time.clock_gettime_ns(CLOCKS[self.clock]) // 1000
