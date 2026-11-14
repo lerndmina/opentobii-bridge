@@ -14,10 +14,11 @@
  *   4. Bytes from the client go to TCP; bytes from TCP go to the reply pipe.
  *
  * Hello to the Linux service, little-endian:
- *   "OTB1", u32 channel, u32 client pid, u32 slot,
+ *   "OTB2", u32 channel, u32 client pid, u32 slot,
  *   u64 QueryPerformanceCounter in microseconds,
  *   u32 monitor count, then per monitor: u8 primary, u16 length, UTF-8
- *   device instance id.
+ *   device instance id, then u16 length + UTF-8 path of the client's
+ *   executable.
  *
  * Build: x86_64-w64-mingw32-gcc -O2 -Wall -o sesp_relay.exe sesp_relay.c \
  *            -lws2_32 -lcfgmgr32 -ladvapi32 -static
@@ -72,6 +73,26 @@ static int send_all(SOCKET s, const void *data, int len) {
         len -= n;
     }
     return 1;
+}
+
+/* Append the client's executable path as u16 length + UTF-8, so the service
+ * can pick that game's profile. An unknown path is sent as length 0. */
+static size_t append_client_exe(uint8_t *out, size_t cap, DWORD pid) {
+    uint16_t len = 0;
+    WCHAR wide[1024];
+    DWORD chars = sizeof wide / sizeof wide[0];
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (cap < 2) return 0;
+    if (process) {
+        if (QueryFullProcessImageNameW(process, 0, wide, &chars) && cap > 2) {
+            int n = WideCharToMultiByte(CP_UTF8, 0, wide, (int)chars, (char *)out + 2,
+                                        (int)(cap - 2 > 2048 ? 2048 : cap - 2), NULL, NULL);
+            if (n > 0) len = (uint16_t)n;
+        }
+        CloseHandle(process);
+    }
+    memcpy(out, &len, 2);
+    return 2 + (size_t)len;
 }
 
 /* Append the active monitors' device instance ids, found the way the game
@@ -175,7 +196,7 @@ static DWORD WINAPI serve(LPVOID arg) {
     size_t used = 0;
     uint32_t slot = (uint32_t)l->slot, pid = client_pid;
     uint64_t now = qpc_micros();
-    memcpy(hello + used, "OTB1", 4); used += 4;
+    memcpy(hello + used, "OTB2", 4); used += 4;
     memcpy(hello + used, &channel, 4); used += 4;
     memcpy(hello + used, &pid, 4); used += 4;
     memcpy(hello + used, &slot, 4); used += 4;
@@ -184,6 +205,7 @@ static DWORD WINAPI serve(LPVOID arg) {
     used += 4;
     uint32_t monitors = append_monitors(hello, sizeof hello, &used);
     memcpy(hello + count_at, &monitors, 4);
+    used += append_client_exe(hello + used, sizeof hello - used, client_pid);
     if (!send_all(l->sock, hello, (int)used)) goto done;
 
     /* Only now tell the client it is connected: the service is listening. */

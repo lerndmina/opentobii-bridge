@@ -404,8 +404,8 @@ mod tests {
             let (position, rotation) = filter.filter(i * DT, input.position_mm, input.rotation_rad);
             let out = smooth.process(i * DT, input);
             assert_eq!(out.position_mm, position);
-            for axis in 0..3 {
-                assert!((out.rotation_rad[axis] - rotation[axis]).abs() < 1e-6);
+            for (got, want) in out.rotation_rad.iter().zip(rotation) {
+                assert!((got - want).abs() < 1e-6);
             }
         }
     }

@@ -5,7 +5,7 @@ use std::thread;
 use opentobii::{start, Config};
 
 const USAGE: &str = "\
-opentobii daemon [--no-smooth] [--monitor N] [--socket PATH]
+opentobii daemon [--no-smooth] [--monitor N] [--socket PATH] [--config PATH]
 
 Runs the bridge between tobiid and games that use Tobii's game integration
 DLL under Proton. Start it before the game.
@@ -13,6 +13,7 @@ DLL under Proton. Start it before the game.
   --no-smooth    send head poses unfiltered
   --monitor N    report monitor N to the game instead of the primary
   --socket PATH  tobiid's socket (default: $XDG_RUNTIME_DIR/tobiid.sock)
+  --config PATH  settings file (default: ~/.config/opentobii/config.toml)
 ";
 
 fn parse(mut args: impl Iterator<Item = String>) -> Result<Config, String> {
@@ -20,9 +21,13 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Config, String> {
         return Err("expected the `daemon` command".into());
     }
     let mut config = Config::default();
+    let mut settings_path = opentobii_core::config::default_path();
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--no-smooth" => config.smoothing = None,
+            "--no-smooth" => config.force_unsmoothed = true,
+            "--config" => {
+                settings_path = Some(PathBuf::from(args.next().ok_or("--config needs a path")?))
+            }
             "--monitor" => {
                 let value = args.next().ok_or("--monitor needs a number")?;
                 config.monitor_index = Some(
@@ -36,6 +41,10 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Config, String> {
             }
             other => return Err(format!("unknown argument `{other}`")),
         }
+    }
+    if let Some(path) = settings_path {
+        config.tuning = opentobii_core::config::Config::load(&path)
+            .map_err(|err| format!("{}: {err}", path.display()))?;
     }
     Ok(config)
 }

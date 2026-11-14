@@ -10,7 +10,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use opentobii::daemon::{monotonic_micros, start, Config, Running};
-use opentobii_core::smooth::Settings;
+use opentobii_core::config::Config as Tuning;
+use opentobii_core::pipeline::{Axis, Profile, Smoothing};
 use opentobii_proto::frames::{display_area_corners, keyed_values, Keyed};
 use opentobii_proto::sesp;
 use opentobii_proto::tobiid::testing::{gaze_raw_body, head_pose_body, presence_body};
@@ -42,7 +43,14 @@ impl Drop for TempDir {
     }
 }
 
-fn rig(smoothing: Option<Settings>) -> Rig {
+/// Settings with smoothing off, so a test sees the values it sent.
+fn unsmoothed() -> Tuning {
+    let mut tuning = Tuning::default();
+    tuning.default.smoothing.enabled = false;
+    tuning
+}
+
+fn rig(tuning: Tuning) -> Rig {
     static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("opentobii-e2e-{}-{n}", std::process::id()));
@@ -69,7 +77,8 @@ fn rig(smoothing: Option<Settings>) -> Rig {
         ttp_addr: any,
         relay_addr: any,
         tobiid_socket: socket,
-        smoothing,
+        tuning,
+        force_unsmoothed: false,
         monitor_index: None,
     })
     .unwrap();
@@ -172,7 +181,7 @@ fn sample(host_micros: i64) -> GazeRaw {
 
 #[test]
 fn subscribes_and_asks_for_the_display_area() {
-    let rig = rig(None);
+    let rig = rig(unsmoothed());
     let streams = tobiid::STREAM_GAZE_RAW | tobiid::STREAM_PRESENCE | tobiid::STREAM_HEAD_POSE;
     let mut expected = tobiid::frame(&tobiid::subscribe(streams));
     expected.extend(tobiid::frame(&tobiid::request(
@@ -185,7 +194,7 @@ fn subscribes_and_asks_for_the_display_area() {
 
 #[test]
 fn the_game_is_told_the_drivers_display_area_and_recorded_identity() {
-    let rig = rig(None);
+    let rig = rig(unsmoothed());
     let mut game = connect(rig.running.ttp_addr);
     let area = command(&mut game, 1, 1430, Vec::new());
     assert_eq!(
@@ -210,7 +219,7 @@ fn the_game_is_told_the_drivers_display_area_and_recorded_identity() {
 
 #[test]
 fn live_gaze_and_presence_reach_a_subscribed_game() {
-    let mut rig = rig(None);
+    let mut rig = rig(unsmoothed());
     let mut game = connect(rig.running.ttp_addr);
     for (seq, stream) in [(1, 0x504u32), (2, 0x500)] {
         let reply = command(
@@ -278,7 +287,7 @@ fn live_gaze_and_presence_reach_a_subscribed_game() {
 
 #[test]
 fn live_head_pose_reaches_the_game_on_the_games_clock() {
-    let mut rig = rig(None);
+    let mut rig = rig(unsmoothed());
     let mut commands = connect(rig.running.relay_addr);
     commands
         .write_all(&helper_hello(sesp::CHANNEL_COMMAND, 1))
@@ -356,7 +365,7 @@ fn live_head_pose_reaches_the_game_on_the_games_clock() {
 
 #[test]
 fn smoothing_steadies_a_noisy_pose_before_it_reaches_the_game() {
-    let mut rig = rig(Some(Settings::default()));
+    let mut rig = rig(Tuning::default());
     let mut commands = connect(rig.running.relay_addr);
     commands
         .write_all(&helper_hello(sesp::CHANNEL_COMMAND, 1))
@@ -400,7 +409,7 @@ fn smoothing_steadies_a_noisy_pose_before_it_reaches_the_game() {
 
 #[test]
 fn garbage_from_a_client_closes_that_connection_only() {
-    let rig = rig(None);
+    let rig = rig(unsmoothed());
     let mut bad = connect(rig.running.ttp_addr);
     let mut header = Vec::new();
     for word in [ttp::MARKER_COMMAND, 1, 0, 1000, 0, u32::MAX] {
@@ -419,4 +428,74 @@ fn garbage_from_a_client_closes_that_connection_only() {
 
     let mut good = connect(rig.running.ttp_addr);
     assert_eq!(command(&mut good, 1, 1000, Vec::new()).error, 0);
+}
+
+/// A hello from a helper that reports the game's executable.
+fn helper_hello_from(channel: u32, slot: u32, executable: &str) -> Vec<u8> {
+    let mut hello = helper_hello(channel, slot);
+    hello[..4].copy_from_slice(b"OTB2");
+    hello.extend_from_slice(&(executable.len() as u16).to_le_bytes());
+    hello.extend_from_slice(executable.as_bytes());
+    hello
+}
+
+#[test]
+fn a_game_with_its_own_profile_gets_that_profile() {
+    let mut tuning = unsmoothed();
+    let yaw = Axis {
+        dead_zone: 1.0,
+        sensitivity: 2.0,
+        ..Axis::default()
+    };
+    let smoothing = Smoothing {
+        enabled: false,
+        ..Smoothing::default()
+    };
+    let profile = Profile {
+        yaw,
+        smoothing,
+        ..Profile::default()
+    };
+    tuning.games.insert("eurotrucks2.exe".into(), profile);
+    let mut rig = rig(tuning);
+
+    let executable = "S:\\steamapps\\common\\ETS2\\bin\\win_x64\\EuroTrucks2.exe";
+    let mut commands = connect(rig.running.relay_addr);
+    commands
+        .write_all(&helper_hello_from(sesp::CHANNEL_COMMAND, 1, executable))
+        .unwrap();
+    let mut subscription = connect(rig.running.relay_addr);
+    subscription
+        .write_all(&helper_hello_from(
+            sesp::CHANNEL_SUBSCRIPTION,
+            2,
+            executable,
+        ))
+        .unwrap();
+    let start = sesp::build(1, sesp::T_HEAD_POSE_START, sesp::Table::new());
+    commands.write_all(&sesp::frame(&start)).unwrap();
+    read_sesp(&mut commands);
+    thread::sleep(Duration::from_millis(50));
+
+    let mut yaw_for = |degrees: f32| {
+        let pose = HeadPose {
+            host_micros: monotonic_micros(),
+            position_valid: true,
+            position_mm: [0.0, 0.0, 700.0],
+            rotation_valid: [true; 3],
+            rotation_rad: [0.0, degrees.to_radians(), 0.0],
+        };
+        rig.driver
+            .write_all(&tobiid::frame(&head_pose_body(&pose)))
+            .unwrap();
+        let message = read_sesp(&mut subscription);
+        let payload = sesp::parse(&message).unwrap().payload.unwrap();
+        payload.f32(6, 0.0).to_degrees()
+    };
+    assert_eq!(yaw_for(0.5), 0.0, "inside the game's dead zone");
+    assert!(
+        (yaw_for(6.0) - 10.0).abs() < 1e-3,
+        "5 degrees beyond it, doubled"
+    );
+    assert!((yaw_for(-6.0) + 10.0).abs() < 1e-3);
 }

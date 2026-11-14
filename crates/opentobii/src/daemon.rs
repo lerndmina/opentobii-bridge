@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use opentobii_core::smooth::{PoseFilter, Settings};
+use opentobii_core::config::{game_key, Config as Tuning};
+use opentobii_core::pipeline::{Pipeline, Pose};
 use opentobii_proto::frames::{self, DisplayFrame, Template};
 use opentobii_proto::tobiid::{self, GazeRaw, HeadPose, ServerMsg};
 use opentobii_proto::ttp::{self, Message};
@@ -55,8 +56,10 @@ pub struct Config {
     pub ttp_addr: SocketAddr,
     pub relay_addr: SocketAddr,
     pub tobiid_socket: PathBuf,
-    /// `None` sends head poses unfiltered.
-    pub smoothing: Option<Settings>,
+    /// The settings file's contents: a default profile and one per game.
+    pub tuning: Tuning,
+    /// Send head poses unsmoothed whatever the profiles say.
+    pub force_unsmoothed: bool,
     /// Which monitor to report to the game; `None` picks the primary.
     pub monitor_index: Option<usize>,
 }
@@ -67,7 +70,8 @@ impl Default for Config {
             ttp_addr: SocketAddr::from(([127, 0, 0, 1], TTP_PORT)),
             relay_addr: SocketAddr::from(([127, 0, 0, 1], RELAY_PORT)),
             tobiid_socket: driver::socket_path(),
-            smoothing: Some(Settings::default()),
+            tuning: Tuning::default(),
+            force_unsmoothed: false,
             monitor_index: None,
         }
     }
@@ -129,6 +133,13 @@ impl Conn {
     }
 }
 
+/// One game process: which executable it is and its pose pipeline.
+#[derive(Debug)]
+struct Game {
+    executable: String,
+    pipeline: Pipeline,
+}
+
 #[derive(Debug)]
 struct State {
     /// Game clock minus `CLOCK_MONOTONIC`, microseconds, from the helper's
@@ -145,7 +156,9 @@ struct State {
     /// Game processes that asked for head pose.
     posing: HashSet<u32>,
     sequences: HashMap<u32, u32>,
-    filter: Option<PoseFilter>,
+    tuning: Tuning,
+    /// What is known about each game process, by process id.
+    games: HashMap<u32, Game>,
 }
 
 #[derive(Debug)]
@@ -225,13 +238,10 @@ pub fn monotonic_micros() -> i64 {
 pub fn start(config: Config) -> io::Result<Running> {
     let ttp_listener = TcpListener::bind(config.ttp_addr)?;
     let relay_listener = TcpListener::bind(config.relay_addr)?;
-    let filter =
-        match config.smoothing {
-            Some(settings) => Some(PoseFilter::new(settings).map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidInput, "bad smoothing settings")
-            })?),
-            None => None,
-        };
+    config
+        .tuning
+        .validate()
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
     let shared = Arc::new(Shared {
         state: Mutex::new(State {
             clock_offset: None,
@@ -244,7 +254,8 @@ pub fn start(config: Config) -> io::Result<Running> {
             pose_sinks: HashMap::new(),
             posing: HashSet::new(),
             sequences: HashMap::new(),
-            filter,
+            tuning: config.tuning.clone(),
+            games: HashMap::new(),
         }),
         replies: recorded::replies(),
         gaze_template: Template::new(recorded::gaze_frame()),
@@ -406,14 +417,18 @@ struct Hello {
     slot: u32,
     counter: u64,
     monitors: Vec<(bool, String)>,
+    /// The game's executable path; empty from a helper before `OTB2`.
+    executable: String,
 }
 
 fn read_hello(stream: &mut TcpStream) -> io::Result<Hello> {
     let mut fixed = [0u8; HELLO_LEN];
     stream.read_exact(&mut fixed)?;
-    if &fixed[..4] != b"OTB1" {
-        return Err(invalid("not a helper hello"));
-    }
+    let with_executable = match &fixed[..4] {
+        b"OTB1" => false,
+        b"OTB2" => true,
+        _ => return Err(invalid("not a helper hello")),
+    };
     let word =
         |at: usize| u32::from_le_bytes([fixed[at], fixed[at + 1], fixed[at + 2], fixed[at + 3]]);
     let counter = u64::from_le_bytes(fixed[16..24].try_into().expect("eight bytes"));
@@ -429,13 +444,58 @@ fn read_hello(stream: &mut TcpStream) -> io::Result<Hello> {
         stream.read_exact(&mut name)?;
         monitors.push((head[0] != 0, String::from_utf8_lossy(&name).into_owned()));
     }
+    let mut executable = String::new();
+    if with_executable {
+        let mut length = [0u8; 2];
+        stream.read_exact(&mut length)?;
+        let mut path = vec![0u8; usize::from(u16::from_le_bytes(length))];
+        stream.read_exact(&mut path)?;
+        executable = String::from_utf8_lossy(&path).into_owned();
+    }
     Ok(Hello {
         channel: word(4),
         pid: word(8),
         slot: word(12),
         counter,
         monitors,
+        executable,
     })
+}
+
+/// Give a game process its pipeline, from its own profile or the default.
+/// Returns a line for the log when the process is new or changed.
+fn register_game(shared: &Shared, state: &mut State, pid: u32, executable: &str) -> Option<String> {
+    if state
+        .games
+        .get(&pid)
+        .is_some_and(|game| game.executable == executable)
+    {
+        return None;
+    }
+    let mut profile = *state.tuning.profile_for(executable);
+    if shared.config.force_unsmoothed {
+        profile.smoothing.enabled = false;
+    }
+    let source = if executable.is_empty() {
+        "the default profile (this helper does not report the game)".to_owned()
+    } else if state.tuning.has_profile(executable) {
+        format!("its own profile ({})", game_key(executable))
+    } else {
+        format!("the default profile (none for {})", game_key(executable))
+    };
+    match Pipeline::new(profile) {
+        Ok(pipeline) => {
+            let game = Game {
+                executable: executable.to_owned(),
+                pipeline,
+            };
+            state.games.insert(pid, game);
+            Some(format!("helper: game process {pid} uses {source}"))
+        }
+        Err(reason) => Some(format!(
+            "helper: profile for process {pid} is unusable: {reason}"
+        )),
+    }
 }
 
 fn serve_helper(shared: &Shared, mut stream: TcpStream) -> io::Result<()> {
@@ -459,6 +519,9 @@ fn serve_helper(shared: &Shared, mut stream: TcpStream) -> io::Result<()> {
                 shared.log(&format!("helper: display id for the game is {name}"));
                 state.monitor_id = name;
             }
+        }
+        if let Some(note) = register_game(shared, &mut state, hello.pid, &hello.executable) {
+            shared.log(&note);
         }
     }
 
@@ -637,28 +700,37 @@ fn on_pose(shared: &Shared, pose: &HeadPose) {
         shared.stats.poses_dropped.fetch_add(1, Ordering::Relaxed);
         return;
     }
-    let (targets, position, rotation, offset) = {
+    let input = Pose {
+        position_mm: pose.position_mm,
+        rotation_rad: pose.rotation_rad,
+    };
+    let (targets, offset) = {
         let mut state = shared.lock();
-        // Filter every pose, wanted or not, so the state is warm when a game
-        // subscribes.
-        let (position, rotation) = match state.filter.as_mut() {
-            Some(filter) => filter.filter(pose.host_micros, pose.position_mm, pose.rotation_rad),
-            None => (pose.position_mm, pose.rotation_rad),
-        };
-        let pids: Vec<u32> = state.posing.iter().copied().collect();
+        let state = &mut *state;
+        // Every known game's pipeline sees every pose, wanted or not, so its
+        // filter is warm when the game asks for head pose.
         let mut targets = Vec::new();
-        for pid in pids {
-            if let Some(sink) = state.pose_sinks.get(&pid).cloned() {
-                let sequence = state.sequences.entry(pid).or_insert(0);
+        for (pid, game) in &mut state.games {
+            let shaped = game.pipeline.process(pose.host_micros, input);
+            if !state.posing.contains(pid) {
+                continue;
+            }
+            if let Some(sink) = state.pose_sinks.get(pid).cloned() {
+                let sequence = state.sequences.entry(*pid).or_insert(0);
                 *sequence = sequence.wrapping_add(1);
-                targets.push((sink, *sequence));
+                targets.push((sink, *sequence, shaped));
             }
         }
-        (targets, position, rotation, state.clock_offset)
+        (targets, state.clock_offset)
     };
     let micros = shared.game_micros(Some(pose.host_micros), offset);
-    for (sink, sequence) in targets {
-        let message = sesp::frame(&sesp::head_pose(sequence, micros, position, rotation));
+    for (sink, sequence, shaped) in targets {
+        let message = sesp::frame(&sesp::head_pose(
+            sequence,
+            micros,
+            shaped.position_mm,
+            shaped.rotation_rad,
+        ));
         if sink.send(&message).is_ok() {
             shared.stats.poses_sent.fetch_add(1, Ordering::Relaxed);
         } else {
