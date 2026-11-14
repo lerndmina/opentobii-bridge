@@ -10,6 +10,7 @@
 pub mod daemon;
 #[cfg(feature = "gui")]
 pub mod gui;
+pub mod install;
 #[cfg(feature = "overlay")]
 pub mod overlay;
 pub mod prefix;

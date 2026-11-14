@@ -6,7 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 use opentobii::steam::{self, Game};
-use opentobii::{prefix, service, start, Config};
+use opentobii::{install, prefix, service, start, Config};
 use opentobii_core::control::{self, Line, Request};
 
 const USAGE: &str = "\
@@ -31,6 +31,14 @@ opentobii: a Tobii Eye Tracker 5 for games under Proton
   opentobii status
       Show what the running daemon is connected to.
 
+  opentobii setup [--autostart]
+      Install opentobii for your user: the program in ~/.local/bin, an
+      app-menu entry, and a background service. No root. With --autostart
+      the daemon is started now and at every login.
+
+  opentobii remove
+      Take that install out again. Settings are kept.
+
   opentobii service [start|stop|restart|enable|disable]
       Run the daemon in the background through your user's systemd, and
       choose whether it starts at login. With no word, show its state.
@@ -54,6 +62,12 @@ fn main() -> ExitCode {
         Some("uninstall") => uninstall(args),
         Some("status") => status(),
         Some("service") => service_command(args),
+        Some("setup") => setup(args),
+        Some("remove") => remove(args),
+        Some("version" | "--version" | "-V") => {
+            println!("opentobii {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         #[cfg(feature = "gui")]
         Some("gui") => opentobii::gui::run(),
         #[cfg(feature = "overlay")]
@@ -219,6 +233,102 @@ fn uninstall(mut args: impl Iterator<Item = String>) -> CommandResult {
     }
     prefix::uninstall(&target).map_err(|err| err.to_string())?;
     println!("Removed the helper for {name}.");
+    Ok(())
+}
+
+fn setup(mut args: impl Iterator<Item = String>) -> CommandResult {
+    let mut autostart = false;
+    for arg in args.by_ref() {
+        match arg.as_str() {
+            "--autostart" => autostart = true,
+            other => return Err(format!("setup: unknown argument `{other}`")),
+        }
+    }
+    let layout = install::Layout::for_user()?;
+    let exe = std::env::current_exe()
+        .map_err(|err| format!("cannot find this program's own path: {err}"))?;
+    if install::kind_of(&exe, &layout) == install::Kind::Packaged {
+        return Err(
+            "this copy was installed by a package and is already set up; \
+                    use `opentobii service enable` to start it at login"
+                .into(),
+        );
+    }
+    // A running daemon keeps using the old file until it is restarted.
+    let was_running = service::state().active;
+    let written = install::place(&exe, &layout)?;
+    println!("Installed:");
+    for path in written {
+        println!("  {}", path.display());
+    }
+    if let Some(other) = install::packaged_copy() {
+        println!(
+            "Note: a packaged copy is also installed at {}.",
+            other.display()
+        );
+        println!("      Which one runs depends on your PATH; removing one avoids confusion.");
+    }
+    let state = service::state();
+    if state.systemd {
+        // The unit file changed on disk: have systemd read it again.
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "daemon-reload"])
+            .status();
+        if autostart {
+            service::set_enabled(true)?;
+            if was_running {
+                service::restart()?
+            } else {
+                service::start()?
+            }
+            println!("The daemon is running and starts at login.");
+        } else if was_running {
+            service::restart()?;
+            println!("The daemon was restarted on the installed copy.");
+        } else {
+            println!("To start the daemon now and at every login:  opentobii service enable && opentobii service start");
+        }
+    } else {
+        println!(
+            "This system has no systemd for your user: start the daemon with `opentobii daemon`."
+        );
+    }
+    let bin = layout.binary.parent().unwrap_or(&layout.binary);
+    if !install::on_path(bin, &std::env::var("PATH").unwrap_or_default()) {
+        println!(
+            "Note: {} is not on your PATH. Use the full path, or add it.",
+            bin.display()
+        );
+    }
+    println!("Next: `opentobii games`, then `opentobii install <game>` with that game closed.");
+    Ok(())
+}
+
+fn remove(mut args: impl Iterator<Item = String>) -> CommandResult {
+    if let Some(extra) = args.next() {
+        return Err(format!("remove: unexpected argument `{extra}`"));
+    }
+    let layout = install::Layout::for_user()?;
+    if service::state().systemd {
+        let _ = service::set_enabled(false);
+        let _ = service::stop();
+    }
+    let removed = install::unplace(&layout)?;
+    if service::state().systemd {
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "daemon-reload"])
+            .status();
+    }
+    if removed.is_empty() {
+        println!("Nothing to remove: opentobii is not installed in your home folder.");
+    } else {
+        println!("Removed:");
+        for path in removed {
+            println!("  {}", path.display());
+        }
+        println!("Settings in ~/.config/opentobii were kept. The helper inside game prefixes is separate:");
+        println!("take it out first with `opentobii uninstall <game>` if you want it gone.");
+    }
     Ok(())
 }
 
