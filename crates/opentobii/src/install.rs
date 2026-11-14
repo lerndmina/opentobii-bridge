@@ -156,6 +156,27 @@ pub fn place(source: &Path, layout: &Layout) -> Result<Vec<PathBuf>, String> {
     ])
 }
 
+/// Bring an install's unit, app-menu entry and icon up to what this version
+/// ships, leaving the ones that already match alone. An update replaces
+/// only the program, so this is how a newer version's other files arrive.
+/// Returns the files rewritten.
+pub fn refresh(layout: &Layout) -> Result<Vec<PathBuf>, String> {
+    let wanted = [
+        (&layout.unit, service::unit_text(&layout.binary)),
+        (&layout.desktop_entry, desktop_entry(&layout.binary)),
+        (&layout.icon, ICON.to_owned()),
+    ];
+    let mut changed = Vec::new();
+    for (path, contents) in wanted {
+        if std::fs::read_to_string(path).is_ok_and(|have| have == contents) {
+            continue;
+        }
+        write_atomic(path, contents.as_bytes(), 0o644)?;
+        changed.push(path.clone());
+    }
+    Ok(changed)
+}
+
 /// Take the files of an install away. Settings are left alone. Returns what
 /// was removed.
 pub fn unplace(layout: &Layout) -> Result<Vec<PathBuf>, String> {
@@ -343,6 +364,68 @@ mod tests {
             "removing twice is fine"
         );
         let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn refresh_rewrites_only_what_differs() {
+        let home = home("refresh");
+        let source = home.join("opentobii-download");
+        std::fs::write(&source, b"x").unwrap();
+        let layout = Layout::new(&home, None, None);
+        place(&source, &layout).unwrap();
+        assert!(
+            refresh(&layout).unwrap().is_empty(),
+            "a fresh install is already current"
+        );
+
+        // As an older version would have left it.
+        std::fs::write(
+            &layout.desktop_entry,
+            "[Desktop Entry]\nCategories=Settings;Game;\n",
+        )
+        .unwrap();
+        assert_eq!(
+            refresh(&layout).unwrap(),
+            std::slice::from_ref(&layout.desktop_entry)
+        );
+        assert_eq!(
+            std::fs::read_to_string(&layout.desktop_entry).unwrap(),
+            desktop_entry(&layout.binary)
+        );
+
+        std::fs::remove_file(&layout.icon).unwrap();
+        assert_eq!(
+            refresh(&layout).unwrap(),
+            std::slice::from_ref(&layout.icon)
+        );
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn the_app_menu_entry_has_one_main_category() {
+        let entry = desktop_entry(Path::new("/home/u/.local/bin/opentobii"));
+        let categories = entry
+            .lines()
+            .find(|line| line.starts_with("Categories="))
+            .unwrap();
+        let main = [
+            "AudioVideo",
+            "Development",
+            "Education",
+            "Game",
+            "Graphics",
+            "Network",
+            "Office",
+            "Science",
+            "Settings",
+            "System",
+            "Utility",
+        ];
+        let count = categories["Categories=".len()..]
+            .split(';')
+            .filter(|name| main.contains(name))
+            .count();
+        assert_eq!(count, 1, "{categories}");
     }
 
     #[test]

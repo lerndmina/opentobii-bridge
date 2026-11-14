@@ -121,6 +121,20 @@ fn daemon(mut args: impl Iterator<Item = String>) -> CommandResult {
             .map_err(|err| format!("{}: {err}", path.display()))?;
         config.settings_path = Some(path);
     }
+    // An update replaces only the program. If this is the installed copy,
+    // bring its launcher entry, icon and unit up to this version's.
+    if let (Ok(install::Kind::Home), Ok(layout)) = (install::kind(), install::Layout::for_user()) {
+        match install::refresh(&layout) {
+            Ok(changed) if changed.contains(&layout.unit) => {
+                // Tell systemd the unit on disk is new; it applies at the next start.
+                let _ = std::process::Command::new("systemctl")
+                    .args(["--user", "daemon-reload"])
+                    .status();
+            }
+            Ok(_) => {}
+            Err(reason) => eprintln!("opentobii: could not refresh the installed files: {reason}"),
+        }
+    }
     let running = start(config).map_err(|err| format!("cannot start: {err}"))?;
     eprintln!(
         "opentobii: TTP on {}, helper relay on {}",

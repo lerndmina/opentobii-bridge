@@ -6,5 +6,5 @@ Comment=Tune head tracking from a Tobii Eye Tracker 5 for games under Proton
 Exec=opentobii gui
 Icon=opentobii
 Terminal=false
-Categories=Settings;HardwareSettings;Game;
+Categories=Settings;HardwareSettings;
 Keywords=tobii;eye;head;tracking;trackir;
