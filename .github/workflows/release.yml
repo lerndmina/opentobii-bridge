@@ -48,13 +48,27 @@ jobs:
           cargo generate-rpm -p crates/opentobii -o dist/
           cargo deb -p opentobii --no-build -o dist/
           packaging/make-tarball.sh "$VERSION" dist
+          # The bare program, for the built-in updater. Its name carries the
+          # version so a signed list from one release cannot stand in for
+          # another.
+          cp target/release/opentobii "dist/opentobii-$VERSION-x86_64-linux"
           cd dist
           sha256sum * > SHA256SUMS
           ls -la
+      - name: Sign the checksums
+        run: cargo run --release --locked -p opentobii-sign -- sign dist/SHA256SUMS
+        env:
+          OPENTOBII_SIGNING_KEY: ${{ secrets.OPENTOBII_SIGNING_KEY }}
+      - name: Check the signature with the shipped program's own key
+        run: cargo test --release --locked -p opentobii --lib release_signature -- --ignored
+        env:
+          OPENTOBII_RELEASE_DIR: ${{ github.workspace }}/dist
       - name: Publish
         run: |
+          # Only a version with a suffix, such as 1.0.0-rc1, is a pre-release.
+          # The updater follows GitHub's "latest release", which skips those.
           flags=""
-          case "$VERSION" in 0.*|*-*) flags="--prerelease" ;; esac
+          case "$VERSION" in *-*) flags="--prerelease" ;; esac
           gh release create "$GITHUB_REF_NAME" dist/* --title "opentobii $VERSION" --generate-notes $flags
         env:
           GH_TOKEN: ${{ github.token }}

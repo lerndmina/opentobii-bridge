@@ -1,0 +1,14 @@
+[package]
+name = "opentobii-sign"
+description = "Signs opentobii's release checksums. Used by the release build; not shipped."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+minisign = "0.10"
+
+[lints]
+workspace = true

@@ -33,6 +33,22 @@ pub struct Config {
     pub games: BTreeMap<String, Profile>,
     /// The on-screen gaze mark.
     pub overlay: Overlay,
+    pub updates: Updates,
+}
+
+/// Whether the tuning window looks for new versions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Updates {
+    /// Ask GitHub for the newest release when the window opens. Nothing
+    /// about the user or the tracker is sent.
+    pub check: bool,
+}
+
+impl Default for Updates {
+    fn default() -> Self {
+        Self { check: true }
+    }
 }
 
 /// Why the settings file could not be used.

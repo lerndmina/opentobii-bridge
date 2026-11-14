@@ -6,7 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 use opentobii::steam::{self, Game};
-use opentobii::{install, prefix, service, start, Config};
+use opentobii::{install, prefix, service, start, update, Config};
 use opentobii_core::control::{self, Line, Request};
 
 const USAGE: &str = "\
@@ -39,6 +39,11 @@ opentobii: a Tobii Eye Tracker 5 for games under Proton
   opentobii remove
       Take that install out again. Settings are kept.
 
+  opentobii update [--check]
+      Update the installed copy to the newest release. Each release is
+      checked against the project's signing key before it is used. With
+      --check, only say whether there is one.
+
   opentobii service [start|stop|restart|enable|disable]
       Run the daemon in the background through your user's systemd, and
       choose whether it starts at login. With no word, show its state.
@@ -63,6 +68,7 @@ fn main() -> ExitCode {
         Some("status") => status(),
         Some("service") => service_command(args),
         Some("setup") => setup(args),
+        Some("update") => update_command(args),
         Some("remove") => remove(args),
         Some("version" | "--version" | "-V") => {
             println!("opentobii {}", env!("CARGO_PKG_VERSION"));
@@ -301,6 +307,64 @@ fn setup(mut args: impl Iterator<Item = String>) -> CommandResult {
         );
     }
     println!("Next: `opentobii games`, then `opentobii install <game>` with that game closed.");
+    Ok(())
+}
+
+fn update_command(mut args: impl Iterator<Item = String>) -> CommandResult {
+    let mut check_only = false;
+    for arg in args.by_ref() {
+        match arg.as_str() {
+            "--check" => check_only = true,
+            other => return Err(format!("update: unknown argument `{other}`")),
+        }
+    }
+    let fetch = update::Http;
+    let have = update::current();
+    let Some(release) = update::newer_release(&fetch, have)? else {
+        println!("opentobii {have} is the newest version.");
+        return Ok(());
+    };
+    println!(
+        "opentobii {} is available (you have {have}).",
+        release.version
+    );
+    if !release.notes.trim().is_empty() {
+        println!();
+        println!("{}", release.notes.trim());
+        println!();
+    }
+    if check_only {
+        return Ok(());
+    }
+    if let Some(reason) = update::refusal(&install::kind()?) {
+        return Err(reason);
+    }
+    let layout = install::Layout::for_user()?;
+    println!("Downloading and checking the release's signature...");
+    let program = update::download_verified(&fetch, &release, update::PUBLIC_KEY)?;
+    let was_running = service::state().active;
+    update::swap(&program, &layout.binary)?;
+    println!("Installed opentobii {}.", release.version);
+    if was_running {
+        // Bring the daemon up on the new version, and go back if it will
+        // not start.
+        let started = service::restart().is_ok() && {
+            std::thread::sleep(Duration::from_millis(1500));
+            service::state().active
+        };
+        if started {
+            println!("The daemon was restarted on the new version.");
+        } else {
+            update::roll_back(&layout.binary)?;
+            let _ = service::restart();
+            return Err(format!(
+                "the daemon did not start on {}, so the previous version was put back",
+                release.version
+            ));
+        }
+    } else {
+        println!("The daemon was not running; it will use the new version when started.");
+    }
     Ok(())
 }
 

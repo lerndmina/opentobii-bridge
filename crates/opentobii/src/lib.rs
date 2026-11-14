@@ -17,5 +17,6 @@ pub mod prefix;
 mod recorded;
 pub mod service;
 pub mod steam;
+pub mod update;
 
 pub use daemon::{start, Config, Running};
