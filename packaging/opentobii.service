@@ -5,7 +5,7 @@ After=tobiid.service
 Wants=tobiid.socket
 
 [Service]
-ExecStart=%h/.local/bin/opentobii daemon
+ExecStart=/usr/bin/opentobii daemon
 Restart=on-failure
 RestartSec=2
 

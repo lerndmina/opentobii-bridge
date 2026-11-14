@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=opentobii
+GenericName=Eye Tracker Tuning
+Comment=Tune head tracking from a Tobii Eye Tracker 5 for games under Proton
+Exec=opentobii gui
+Icon=opentobii
+Terminal=false
+Categories=Settings;HardwareSettings;Game;
+Keywords=tobii;eye;head;tracking;trackir;

@@ -21,6 +21,29 @@ This repo does not contain a USB driver. It builds on an existing Linux driver f
 
 Not yet done: gaze features in the game, tuning of the head pose smoothing, and a run on Valve's stock Proton.
 
+## Install
+
+opentobii needs the tracker's driver, [Skyggedans/tobii-linux](https://github.com/Skyggedans/tobii-linux), installed and calibrated first. Then take one of these from the [releases page](https://github.com/lerndmina/opentobii-bridge/releases):
+
+| File | For | Install |
+|---|---|---|
+| `opentobii-<version>-1.x86_64.rpm` | Fedora, openSUSE | `sudo dnf install ./opentobii-*.rpm` |
+| `opentobii_<version>-1_amd64.deb` | Debian, Ubuntu, Mint | `sudo apt install ./opentobii_*.deb` |
+| `opentobii-<version>-x86_64-linux.tar.gz` | Anything else, or no root | unpack, then `./install.sh` |
+
+`SHA256SUMS` lists the checksum of each. The tarball's `install.sh` copies everything into your home folder and `uninstall.sh` takes it out again.
+
+Then:
+
+```sh
+systemctl --user enable --now opentobii   # start the daemon now and at login
+opentobii games                           # games that can use the tracker
+opentobii install <app id or name>        # with that game closed
+opentobii gui                             # tune it
+```
+
+In the game, switch eye tracking on in its options if it has such a switch.
+
 ## The daemon
 
 The Python proofs are being replaced by one Rust program. Build and run it with:

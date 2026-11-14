@@ -21,6 +21,7 @@ fn main() {
         .join("sesp_relay.exe");
     println!("cargo:rerun-if-changed={}", source.display());
     println!("cargo:rerun-if-env-changed=PATH");
+    println!("cargo:rerun-if-env-changed=OPENTOBII_REQUIRE_HELPER");
 
     let built = Command::new(COMPILER)
         .args(["-O2", "-Wall", "-Wextra", "-o"])
@@ -31,6 +32,10 @@ fn main() {
     match built {
         Ok(status) if status.success() => {}
         Ok(status) => panic!("{COMPILER} failed to build the helper: {status}"),
+        // A release build sets this, so it can never ship without the helper.
+        Err(_) if std::env::var_os("OPENTOBII_REQUIRE_HELPER").is_some() => {
+            panic!("{COMPILER} not found, and OPENTOBII_REQUIRE_HELPER is set");
+        }
         Err(_) => {
             println!("cargo:warning={COMPILER} not found: building without the prefix helper");
             std::fs::write(&out, b"").expect("OUT_DIR is writable");

@@ -1,0 +1,60 @@
+name: Release
+
+# Push a tag like v0.1.0 to build the packages and publish a release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.99.1"
+
+jobs:
+  release:
+    # An older Ubuntu, so the binary runs on distros with an older glibc.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check the tag matches the version
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match Cargo.toml version $version" >&2
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libfontconfig1-dev pkg-config gcc-mingw-w64-x86-64
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
+      - name: Build
+        run: cargo build --release --locked
+        env:
+          # Fail instead of shipping a binary with no prefix helper inside.
+          OPENTOBII_REQUIRE_HELPER: "1"
+      - name: Packaging tools
+        run: cargo install --locked cargo-generate-rpm@0.21.1 cargo-deb@3.8.0
+      - name: Packages
+        run: |
+          mkdir -p dist
+          cargo generate-rpm -p crates/opentobii -o dist/
+          cargo deb -p opentobii --no-build -o dist/
+          packaging/make-tarball.sh "$VERSION" dist
+          cd dist
+          sha256sum * > SHA256SUMS
+          ls -la
+      - name: Publish
+        run: |
+          flags=""
+          case "$VERSION" in 0.*|*-*) flags="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* --title "opentobii $VERSION" --generate-notes $flags
+        env:
+          GH_TOKEN: ${{ github.token }}

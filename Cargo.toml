@@ -12,3 +12,7 @@ repository = "https://github.com/lerndmina/opentobii-bridge"
 # "deny", not "forbid": the code Slint generates for the window allows it
 # locally. Nothing written in this repository uses unsafe.
 unsafe_code = "deny"
+
+[profile.release]
+# Symbols are not shipped: it takes the binary from 32 MB to 25 MB.
+strip = true

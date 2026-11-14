@@ -5,6 +5,40 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "../../README.md"
+
+[package.metadata.generate-rpm]
+summary = "Tobii Eye Tracker 5 head and eye tracking for games under Proton"
+assets = [
+    { source = "target/release/opentobii", dest = "/usr/bin/opentobii", mode = "755" },
+    { source = "../../packaging/opentobii.service", dest = "/usr/lib/systemd/user/opentobii.service", mode = "644" },
+    { source = "../../packaging/opentobii.desktop", dest = "/usr/share/applications/opentobii.desktop", mode = "644" },
+    { source = "../../packaging/opentobii.svg", dest = "/usr/share/icons/hicolor/scalable/apps/opentobii.svg", mode = "644" },
+    { source = "../../LICENSE", dest = "/usr/share/licenses/opentobii/LICENSE", mode = "644", doc = true },
+    { source = "../../README.md", dest = "/usr/share/doc/opentobii/README.md", mode = "644", doc = true },
+]
+
+[package.metadata.generate-rpm.recommends]
+tobii-linux = "*"
+
+[package.metadata.deb]
+name = "opentobii"
+maintainer = "lerndmina"
+section = "games"
+priority = "optional"
+depends = "$auto"
+extended-description = """\
+Feeds live head pose and gaze from a Tobii Eye Tracker 5 to games that ship \
+Tobii's game integration DLL and run under Proton, with no game files changed. \
+Includes a tuning window for smoothing, dead zone and sensitivity. \
+Needs the tobii-linux driver (tobiid) from Skyggedans."""
+assets = [
+    ["target/release/opentobii", "usr/bin/", "755"],
+    ["../../packaging/opentobii.service", "usr/lib/systemd/user/", "644"],
+    ["../../packaging/opentobii.desktop", "usr/share/applications/", "644"],
+    ["../../packaging/opentobii.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+    ["../../README.md", "usr/share/doc/opentobii/", "644"],
+]
 
 [features]
 default = ["gui"]
