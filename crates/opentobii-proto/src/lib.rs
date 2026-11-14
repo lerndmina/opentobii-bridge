@@ -2,7 +2,10 @@
 //!
 //! - [`ttp`]: the tracker protocol, as the Tobii game integration DLL speaks
 //!   it over TCP.
+//! - [`sesp`]: the services pipe that carries head pose and the display id.
 
+pub mod sesp;
+pub mod tobiid;
 pub mod ttp;
 
 #[cfg(test)]
