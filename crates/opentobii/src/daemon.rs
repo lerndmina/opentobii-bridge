@@ -34,8 +34,10 @@ const STREAM_GAZE: u32 = 0x500;
 const STREAM_PRESENCE: u32 = 0x504;
 
 const AREA_REQUEST_ID: u32 = 1;
-const DRIVER_STREAMS: u32 =
-    driver::STREAM_GAZE_RAW | driver::STREAM_PRESENCE | driver::STREAM_HEAD_POSE;
+const DRIVER_STREAMS: u32 = driver::STREAM_GAZE_RAW
+    | driver::STREAM_PRESENCE
+    | driver::STREAM_HEAD_POSE
+    | driver::STREAM_NOTIFICATIONS;
 const CAPABILITIES: [u16; 3] = [
     sesp::CAP_HEAD_POSE,
     sesp::CAP_DISPLAY_INFO,
@@ -700,6 +702,13 @@ fn driver_loop(shared: &Shared, mut stream: UnixStream) -> io::Result<()> {
                     status,
                     payload,
                 }) => on_display_area(shared, status, &payload),
+                Some(ServerMsg::Notification) => {
+                    // A calibration may have changed which screen the tracker
+                    // is on or how big it is: ask again.
+                    let again =
+                        driver::request(AREA_REQUEST_ID, driver::KIND_DISPLAY_AREA_GET, &[]);
+                    stream.write_all(&driver::frame(&again))?;
+                }
                 Some(ServerMsg::Reply { .. }) | None => {}
             }
         }

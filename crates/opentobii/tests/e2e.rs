@@ -185,7 +185,10 @@ fn sample(host_micros: i64) -> GazeRaw {
 #[test]
 fn subscribes_and_asks_for_the_display_area() {
     let rig = rig(unsmoothed());
-    let streams = tobiid::STREAM_GAZE_RAW | tobiid::STREAM_PRESENCE | tobiid::STREAM_HEAD_POSE;
+    let streams = tobiid::STREAM_GAZE_RAW
+        | tobiid::STREAM_PRESENCE
+        | tobiid::STREAM_HEAD_POSE
+        | tobiid::STREAM_NOTIFICATIONS;
     let mut expected = tobiid::frame(&tobiid::subscribe(streams));
     expected.extend(tobiid::frame(&tobiid::request(
         1,
@@ -753,4 +756,39 @@ fn a_second_daemon_on_the_same_control_socket_does_not_start() {
         err.to_string().contains("another opentobii daemon"),
         "{err}"
     );
+}
+
+#[test]
+fn a_notification_makes_the_daemon_fetch_the_display_area_again() {
+    let mut rig = rig(unsmoothed());
+    rig.driver
+        .write_all(&tobiid::frame(&[tobiid::TAG_NOTIFICATION, 3]))
+        .unwrap();
+    // The daemon asks again; answer with a wider screen.
+    let mut request = [0u8; 10];
+    rig.driver.set_read_timeout(Some(TIMEOUT)).unwrap();
+    rig.driver.read_exact(&mut request).unwrap();
+    assert_eq!(
+        request.to_vec(),
+        tobiid::frame(&tobiid::request(1, tobiid::KIND_DISPLAY_AREA_GET, &[]))
+    );
+    let wider: [[f32; 3]; 3] = [
+        [-350.0, 400.0, 100.0],
+        [350.0, 400.0, 100.0],
+        [-350.0, 5.0, -2.0],
+    ];
+    let mut reply = vec![tobiid::TAG_REPLY, 1, 0, 0, 0, tobiid::STATUS_OK];
+    reply.extend(wider.iter().flatten().flat_map(|v| v.to_le_bytes()));
+    rig.driver.write_all(&tobiid::frame(&reply)).unwrap();
+
+    let mut game = connect(rig.running.ttp_addr);
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let area = command(&mut game, 1, 1430, Vec::new());
+        if display_area_corners(&area.payload) == Some(wider.map(|c| c.map(f64::from))) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the game is told the new area");
+        thread::sleep(Duration::from_millis(10));
+    }
 }

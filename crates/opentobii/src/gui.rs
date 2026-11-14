@@ -46,6 +46,11 @@ enum Event {
     Status(Status),
     Recentred(Option<String>, Neutral),
     Failed(String),
+    /// What the driver's calibration tool reports, or `None` when the tool
+    /// is not installed.
+    Calibration(Option<Calibration>),
+    /// The calibration tool finished, with what to tell the user.
+    Calibrated(String),
 }
 
 /// What the window asks the daemon to do.
@@ -53,6 +58,110 @@ enum Command {
     Set(Option<String>, Box<Profile>),
     Delete(String),
     Recentre(Option<String>),
+}
+
+// --- the driver's calibration tool -------------------------------------------
+
+/// The driver's own calibration program. It sets up which monitor the
+/// tracker is on and how big it is, then runs the eye calibration.
+const CALIBRATE: &str = "tobii-calibrate";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Monitor {
+    /// What `--monitor` takes: the connector name, such as `DP-4`.
+    name: String,
+    /// What the list shows: name and size.
+    label: String,
+    /// The tool would calibrate here by default.
+    current: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct Calibration {
+    monitors: Vec<Monitor>,
+    /// The calibration and display area lines of `--status`.
+    summary: String,
+}
+
+/// Read `tobii-calibrate --list-monitors`: lines like
+/// `2: DP-4 (2560x1440, 590 x 333 mm)  <- calibrates here`.
+fn parse_monitors(text: &str) -> Vec<Monitor> {
+    text.lines()
+        .filter_map(|line| {
+            let (index, rest) = line.split_once(':')?;
+            index.trim().parse::<u32>().ok()?;
+            let current = rest.contains("<-");
+            let label = rest.split("<-").next()?.trim().to_owned();
+            let name = label.split_whitespace().next()?.to_owned();
+            Some(Monitor {
+                name,
+                label,
+                current,
+            })
+        })
+        .collect()
+}
+
+/// The two lines of `tobii-calibrate --status` worth showing, with the
+/// column padding and the file paths taken out.
+fn parse_status(text: &str) -> String {
+    let lines: Vec<String> = text
+        .lines()
+        .filter(|line| line.starts_with("calibration") || line.starts_with("display area"))
+        .map(|line| {
+            let line = line.split(" (~").next().unwrap_or(line);
+            let (label, value) = line.split_at(line.find("  ").unwrap_or(line.len()));
+            let mut label = label.to_owned();
+            if let Some(first) = label.get_mut(..1) {
+                first.make_ascii_uppercase();
+            }
+            format!("{label}: {}", value.trim())
+        })
+        .collect();
+    lines.join("\n")
+}
+
+fn tool_output(argument: &str) -> Option<String> {
+    let output = std::process::Command::new(CALIBRATE)
+        .arg(argument)
+        .output()
+        .ok()?;
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Ask the tool what it knows. `None` when it is not installed.
+fn read_calibration() -> Option<Calibration> {
+    let monitors = parse_monitors(&tool_output("--list-monitors")?);
+    let summary = tool_output("--status")
+        .map(|text| parse_status(&text))
+        .unwrap_or_default();
+    Some(Calibration { monitors, summary })
+}
+
+/// What to say when the tool exits, from its documented exit statuses.
+fn calibration_result(code: Option<i32>) -> String {
+    match code {
+        Some(0) => "Calibration saved.".to_owned(),
+        Some(2) => "Calibration saved. The tracker takes it at its next start.".to_owned(),
+        _ => "Calibration was not completed.".to_owned(),
+    }
+}
+
+/// Run the calibration tool to the end, then report and re-read its state.
+fn run_calibration(monitor: Option<String>, keep_display_setup: bool, events: &Sender<Event>) {
+    let mut command = std::process::Command::new(CALIBRATE);
+    if let Some(monitor) = monitor {
+        command.arg("--monitor").arg(monitor);
+    }
+    if keep_display_setup {
+        command.arg("--no-display-setup");
+    }
+    let message = match command.status() {
+        Ok(status) => calibration_result(status.code()),
+        Err(err) => format!("Could not start {CALIBRATE}: {err}"),
+    };
+    let _ = events.send(Event::Calibrated(message));
+    let _ = events.send(Event::Calibration(read_calibration()));
 }
 
 // --- pure helpers, tested without a window ---------------------------------
@@ -221,6 +330,9 @@ struct Ui {
     pipeline: Pipeline,
     last_pose: Option<(Instant, RawPose, Pose)>,
     failure: Option<String>,
+    calibration: Option<Calibration>,
+    calibration_note: String,
+    events: Sender<Event>,
     /// The newest unsent change, and when the last one went out.
     pending: Option<(Option<String>, Profile)>,
     last_sent: Instant,
@@ -282,6 +394,60 @@ impl Ui {
     }
 
     /// Status pills, the notice line and the profile list.
+    /// The calibration card. `reselect` puts the monitor list back on the
+    /// one the tool would use.
+    fn refresh_calibration(&self, reselect: bool) {
+        let app = &self.app;
+        let Some(calibration) = &self.calibration else {
+            app.set_calibration_available(false);
+            app.set_calibration_text(
+                format!("The driver's calibration tool ({CALIBRATE}) was not found.").into(),
+            );
+            return;
+        };
+        app.set_calibration_available(!calibration.monitors.is_empty());
+        let mut text = calibration.summary.clone();
+        if !self.calibration_note.is_empty() {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(&self.calibration_note);
+        }
+        if calibration.monitors.is_empty() {
+            text = "The calibration tool found no monitor.".to_owned();
+        }
+        app.set_calibration_text(text.into());
+        if reselect {
+            let labels: Vec<SharedString> = calibration
+                .monitors
+                .iter()
+                .map(|monitor| monitor.label.as_str().into())
+                .collect();
+            let current = calibration
+                .monitors
+                .iter()
+                .position(|monitor| monitor.current);
+            app.set_monitors(ModelRc::new(VecModel::from(labels)));
+            app.set_monitor_index(i32::try_from(current.unwrap_or(0)).unwrap_or(0));
+        }
+    }
+
+    fn calibrate(&mut self) {
+        let Some(calibration) = &self.calibration else {
+            return;
+        };
+        let monitor = usize::try_from(self.app.get_monitor_index())
+            .ok()
+            .and_then(|index| calibration.monitors.get(index))
+            .map(|monitor| monitor.name.clone());
+        let keep = self.app.get_keep_display_setup();
+        self.calibration_note = "The calibration screen is open on that monitor.".to_owned();
+        self.app.set_calibrating(true);
+        self.refresh_calibration(false);
+        let events = self.events.clone();
+        thread::spawn(move || run_calibration(monitor, keep, &events));
+    }
+
     fn refresh_chrome(&self) {
         let app = &self.app;
         app.set_daemon_connected(self.connected);
@@ -460,6 +626,15 @@ impl Ui {
                 let _ = self.pipeline.set_profile(self.profile());
                 self.refresh_all();
             }
+            Event::Calibration(calibration) => {
+                self.calibration = calibration;
+                self.refresh_calibration(true);
+            }
+            Event::Calibrated(message) => {
+                self.calibration_note = message;
+                self.app.set_calibrating(false);
+                self.refresh_calibration(false);
+            }
             Event::Failed(reason) => {
                 self.failure = Some(reason);
                 self.refresh_chrome();
@@ -569,7 +744,16 @@ pub fn run() -> Result<(), String> {
         let events = event_tx.clone();
         move || follow(events)
     });
-    thread::spawn(move || send_commands(command_rx, event_tx));
+    thread::spawn({
+        let events = event_tx.clone();
+        move || {
+            let _ = events.send(Event::Calibration(read_calibration()));
+        }
+    });
+    thread::spawn({
+        let events = event_tx.clone();
+        move || send_commands(command_rx, events)
+    });
 
     let blank = |names: [&str; 3], group| {
         let rows: Vec<AxisRow> = names
@@ -593,6 +777,9 @@ pub fn run() -> Result<(), String> {
         pipeline: Pipeline::new(Profile::default())?,
         last_pose: None,
         failure: None,
+        calibration: None,
+        calibration_note: String::new(),
+        events: event_tx.clone(),
         pending: None,
         last_sent: Instant::now(),
         rotation,
@@ -712,6 +899,14 @@ pub fn run() -> Result<(), String> {
             }
         }
     });
+    app.on_calibrate({
+        let ui = Rc::clone(&ui);
+        move || {
+            if let Ok(mut ui) = ui.try_borrow_mut() {
+                ui.calibrate();
+            }
+        }
+    });
     app.on_recentre({
         let ui = Rc::clone(&ui);
         move || {
@@ -789,6 +984,41 @@ pub fn run() -> Result<(), String> {
 mod tests {
     use super::*;
     use opentobii_core::control::GameStatus;
+
+    #[test]
+    fn reads_the_calibration_tools_monitor_list() {
+        let text = "0: HDMI-A-2 (1920x1080, 598 x 336 mm)\n1: DP-2 (2560x1440, 697 x 392 mm)\n2: DP-4 (2560x1440, 590 x 333 mm)  <- calibrates here\nnot a monitor line\n";
+        let monitors = parse_monitors(text);
+        assert_eq!(monitors.len(), 3);
+        assert_eq!(monitors[0].name, "HDMI-A-2");
+        assert_eq!(monitors[2].label, "DP-4 (2560x1440, 590 x 333 mm)");
+        assert_eq!(
+            monitors.iter().map(|m| m.current).collect::<Vec<_>>(),
+            [false, false, true]
+        );
+        assert!(parse_monitors("").is_empty());
+    }
+
+    #[test]
+    fn reads_the_calibration_tools_status() {
+        let text = "calibration   yours: id 1453771709, 14 points, saved 2026-11-14 (~/.config/tobii/calibration.bin)\ndisplay area  yours: 590.0 x 333.0 mm (26.7\"), saved 2026-11-14 (~/.config/tobii/display-area)\ntracker       plugged in (USB 3-2)\nreminders     on, none shown yet\n";
+        assert_eq!(
+            parse_status(text),
+            "Calibration: yours: id 1453771709, 14 points, saved 2026-11-14\nDisplay area: yours: 590.0 x 333.0 mm (26.7\"), saved 2026-11-14"
+        );
+        assert_eq!(parse_status("something else entirely"), "");
+    }
+
+    #[test]
+    fn exit_statuses_become_plain_messages() {
+        assert_eq!(calibration_result(Some(0)), "Calibration saved.");
+        assert!(calibration_result(Some(2)).contains("next start"));
+        assert_eq!(
+            calibration_result(Some(1)),
+            "Calibration was not completed."
+        );
+        assert_eq!(calibration_result(None), "Calibration was not completed.");
+    }
 
     #[test]
     fn steadiness_slider_covers_three_hertz_down_to_a_tenth() {

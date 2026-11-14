@@ -16,10 +16,13 @@ pub const TAG_REQUEST: u8 = 0x03;
 pub const TAG_SUBSCRIBED: u8 = 0x10;
 pub const TAG_REPLY: u8 = 0x11;
 pub const TAG_PRESENCE: u8 = 0x22;
+/// A device notification, such as a changed display area.
+pub const TAG_NOTIFICATION: u8 = 0x27;
 pub const TAG_GAZE_RAW: u8 = 0x28;
 pub const TAG_HEAD_POSE: u8 = 0x29;
 
 pub const STREAM_PRESENCE: u32 = 1 << 2;
+pub const STREAM_NOTIFICATIONS: u32 = 1 << 7;
 pub const STREAM_GAZE_RAW: u32 = 1 << 8;
 pub const STREAM_HEAD_POSE: u32 = 1 << 9;
 
@@ -166,6 +169,9 @@ pub enum ServerMsg {
     },
     HeadPose(HeadPose),
     GazeRaw(Box<GazeRaw>),
+    /// The tracker reported a change. What changed is not decoded: the
+    /// bridge asks again for what it cares about.
+    Notification,
 }
 
 /// Reads little-endian scalars off a body; a short body is `None`.
@@ -273,6 +279,7 @@ pub fn decode(body: &[u8]) -> Option<ServerMsg> {
                 rotation_rad: r.f32s()?,
             }))
         }
+        TAG_NOTIFICATION => Some(ServerMsg::Notification),
         TAG_GAZE_RAW => gaze_raw(&mut r).map(|raw| ServerMsg::GazeRaw(Box::new(raw))),
         _ => None,
     }
@@ -439,6 +446,15 @@ mod tests {
                 status: 0,
                 payload: b"xyz".to_vec()
             })
+        );
+    }
+
+    #[test]
+    fn a_notification_is_recognised_whatever_it_carries() {
+        assert_eq!(decode(&[TAG_NOTIFICATION]), Some(ServerMsg::Notification));
+        assert_eq!(
+            decode(&[TAG_NOTIFICATION, 3, 9, 9, 9]),
+            Some(ServerMsg::Notification)
         );
     }
 

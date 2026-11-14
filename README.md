@@ -53,7 +53,7 @@ opentobii gui
 
 ![The opentobii tuning window](docs/gui.png)
 
-Shows what the tracker sees against what is sent to the game, and edits the selected profile live: smoothing, and per axis a dead zone, sensitivity, curve, limit and invert. "Recentre" makes your current head pose the neutral one. It talks to the running daemon, so start that first. Building it needs `fontconfig-devel`; `cargo build --no-default-features` builds the daemon and commands without the window.
+Shows what the tracker sees against what is sent to the game, and edits the selected profile live: smoothing, and per axis a dead zone, sensitivity, curve, limit and invert. "Recentre" makes your current head pose the neutral one. The Calibration card runs the driver's `tobii-calibrate` on the monitor you pick, which sets up the screen the tracker sits on and then calibrates your eyes; the daemon picks up a changed screen setup by itself. It talks to the running daemon, so start that first. Building it needs `fontconfig-devel`; `cargo build --no-default-features` builds the daemon and commands without the window.
 
 ### Settings
 

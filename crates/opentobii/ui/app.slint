@@ -322,7 +322,7 @@ component Legend inherits HorizontalLayout {
 export component App inherits Window {
     title: "opentobii";
     preferred-width: 1040px;
-    preferred-height: 760px;
+    preferred-height: 860px;
     min-width: 860px;
     min-height: 560px;
     background: Theme.window;
@@ -360,11 +360,19 @@ export component App inherits Window {
     in property <float> look-roll;
     in property <string> look-range-text;
 
+    in property <bool> calibration-available;
+    in property <string> calibration-text;
+    in property <[string]> monitors;
+    in-out property <int> monitor-index;
+    in-out property <bool> keep-display-setup;
+    in property <bool> calibrating;
+
     callback profile-selected(int);
     callback create-profile();
     callback delete-profile();
     callback reset-profile();
     callback recentre();
+    callback calibrate();
     callback smoothing-toggled(bool);
     callback steadiness-changed(float);
     callback response-changed(float);
@@ -463,84 +471,117 @@ export component App inherits Window {
         HorizontalLayout {
             spacing: 14px;
 
-            VerticalLayout {
-                spacing: 14px;
-                width: 340px;
+            ScrollView {
+                width: 354px;
+                VerticalLayout {
+                    spacing: 14px;
+                    padding-right: 14px;
 
-                Card {
-                    title: "Live view";
-                    hint: root.look-range-text;
-                    LookPad {
-                        raw-x: root.look-raw-x;
-                        raw-y: root.look-raw-y;
-                        out-x: root.look-out-x;
-                        out-y: root.look-out-y;
-                        dead-x: root.look-dead-x;
-                        dead-y: root.look-dead-y;
-                        roll: root.look-roll;
-                        live: root.tracking;
-                    }
-                    HorizontalLayout {
-                        spacing: 16px;
-                        alignment: start;
-                        Legend {
-                            dot: Theme.raw;
-                            label: "Tracker";
+                    Card {
+                        title: "Live view";
+                        hint: root.look-range-text;
+                        LookPad {
+                            raw-x: root.look-raw-x;
+                            raw-y: root.look-raw-y;
+                            out-x: root.look-out-x;
+                            out-y: root.look-out-y;
+                            dead-x: root.look-dead-x;
+                            dead-y: root.look-dead-y;
+                            roll: root.look-roll;
+                            live: root.tracking;
                         }
-                        Legend {
-                            dot: Theme.accent;
-                            label: "Sent to the game";
-                        }
-                    }
-                    Button {
-                        text: "Recentre: this is straight ahead";
-                        primary: true;
-                        enabled: root.tracking;
-                        clicked => {
-                            root.recentre();
-                        }
-                    }
-                }
-
-                Card {
-                    title: "Profile";
-                    hint: "";
-                    vertical-stretch: 0;
-                    ComboBox {
-                        model: root.profiles;
-                        current-index <=> root.profile-index;
-                        selected => {
-                            root.profile-selected(self.current-index);
-                        }
-                    }
-                    if root.can-create: Button {
-                        text: root.create-text;
-                        clicked => {
-                            root.create-profile();
-                        }
-                    }
-                    HorizontalLayout {
-                        spacing: 8px;
-                        Button {
-                            text: "Reset to defaults";
-                            horizontal-stretch: 1;
-                            clicked => {
-                                root.reset-profile();
+                        HorizontalLayout {
+                            spacing: 16px;
+                            alignment: start;
+                            Legend {
+                                dot: Theme.raw;
+                                label: "Tracker";
+                            }
+                            Legend {
+                                dot: Theme.accent;
+                                label: "Sent to the game";
                             }
                         }
                         Button {
-                            text: "Delete profile";
-                            horizontal-stretch: 1;
-                            enabled: root.can-delete;
+                            text: "Recentre: this is straight ahead";
+                            primary: true;
+                            enabled: root.tracking;
                             clicked => {
-                                root.delete-profile();
+                                root.recentre();
                             }
                         }
                     }
-                }
 
-                Rectangle {
-                    vertical-stretch: 1;
+                    Card {
+                        title: "Profile";
+                        hint: "";
+                        vertical-stretch: 0;
+                        ComboBox {
+                            model: root.profiles;
+                            current-index <=> root.profile-index;
+                            selected => {
+                                root.profile-selected(self.current-index);
+                            }
+                        }
+                        if root.can-create: Button {
+                            text: root.create-text;
+                            clicked => {
+                                root.create-profile();
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Button {
+                                text: "Reset to defaults";
+                                horizontal-stretch: 1;
+                                clicked => {
+                                    root.reset-profile();
+                                }
+                            }
+                            Button {
+                                text: "Delete profile";
+                                horizontal-stretch: 1;
+                                enabled: root.can-delete;
+                                clicked => {
+                                    root.delete-profile();
+                                }
+                            }
+                        }
+                    }
+
+                    Card {
+                        title: "Calibration";
+                        hint: "";
+                        vertical-stretch: 0;
+                        Text {
+                            text: root.calibration-text;
+                            color: Theme.muted;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                        if root.calibration-available: ComboBox {
+                            model: root.monitors;
+                            current-index <=> root.monitor-index;
+                            enabled: !root.calibrating;
+                        }
+                        if root.calibration-available: Switch {
+                            text: "Keep the current screen setup";
+                            checked <=> root.keep-display-setup;
+                            enabled: !root.calibrating;
+                        }
+                        if root.calibration-available: Button {
+                            text: root.calibrating ? "Calibrating…" : "Calibrate on this monitor";
+                            enabled: !root.calibrating;
+                            clicked => {
+                                root.calibrate();
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        vertical-stretch: 1;
+                    }
+            
                 }
             }
 
