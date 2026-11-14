@@ -12,13 +12,16 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use opentobii_core::config::{game_key, Config as Tuning};
-use opentobii_core::pipeline::{Pipeline, Pose};
+use opentobii_core::control::RawPose;
+use opentobii_core::pipeline::{Pipeline, Pose, Profile};
 use opentobii_proto::frames::{self, DisplayFrame, Template};
 use opentobii_proto::tobiid::{self, GazeRaw, HeadPose, ServerMsg};
 use opentobii_proto::ttp::{self, Message};
 use opentobii_proto::{sesp, tobiid as driver};
 
 use crate::recorded;
+
+mod control;
 
 pub const TTP_PORT: u16 = 4455;
 pub const RELAY_PORT: u16 = 47455;
@@ -60,6 +63,10 @@ pub struct Config {
     pub tuning: Tuning,
     /// Send head poses unsmoothed whatever the profiles say.
     pub force_unsmoothed: bool,
+    /// Where settings changed over the control socket are saved.
+    pub settings_path: Option<PathBuf>,
+    /// Where the control socket listens; `None` for no control socket.
+    pub control_socket: Option<PathBuf>,
     /// Which monitor to report to the game; `None` picks the primary.
     pub monitor_index: Option<usize>,
 }
@@ -72,6 +79,8 @@ impl Default for Config {
             tobiid_socket: driver::socket_path(),
             tuning: Tuning::default(),
             force_unsmoothed: false,
+            settings_path: None,
+            control_socket: Some(opentobii_core::control::socket_path()),
             monitor_index: None,
         }
     }
@@ -91,6 +100,8 @@ pub struct Stats {
 pub struct Running {
     pub ttp_addr: SocketAddr,
     pub relay_addr: SocketAddr,
+    /// The control socket's path, when there is one.
+    pub control_socket: Option<PathBuf>,
     shared: Arc<Shared>,
 }
 
@@ -159,6 +170,14 @@ struct State {
     tuning: Tuning,
     /// What is known about each game process, by process id.
     games: HashMap<u32, Game>,
+    /// The default profile's pipeline, run on every pose whether or not a
+    /// game is connected: a recentre takes its neutral pose from here.
+    preview: Pipeline,
+    driver_connected: bool,
+    last_pose: Option<Instant>,
+    display_width_mm: Option<f64>,
+    /// Control clients that subscribed to poses and status.
+    watchers: Vec<Arc<control::Watcher>>,
 }
 
 #[derive(Debug)]
@@ -242,6 +261,12 @@ pub fn start(config: Config) -> io::Result<Running> {
         .tuning
         .validate()
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
+    let preview = Pipeline::new(effective(&config, config.tuning.default))
+        .map_err(|reason| io::Error::new(io::ErrorKind::InvalidInput, reason))?;
+    let control_listener = match &config.control_socket {
+        Some(path) => Some(control::bind(path)?),
+        None => None,
+    };
     let shared = Arc::new(Shared {
         state: Mutex::new(State {
             clock_offset: None,
@@ -256,6 +281,11 @@ pub fn start(config: Config) -> io::Result<Running> {
             sequences: HashMap::new(),
             tuning: config.tuning.clone(),
             games: HashMap::new(),
+            preview,
+            driver_connected: false,
+            last_pose: None,
+            display_width_mm: None,
+            watchers: Vec::new(),
         }),
         replies: recorded::replies(),
         gaze_template: Template::new(recorded::gaze_frame()),
@@ -268,6 +298,7 @@ pub fn start(config: Config) -> io::Result<Running> {
     let running = Running {
         ttp_addr: ttp_listener.local_addr()?,
         relay_addr: relay_listener.local_addr()?,
+        control_socket: shared.config.control_socket.clone(),
         shared: Arc::clone(&shared),
     };
 
@@ -277,6 +308,16 @@ pub fn start(config: Config) -> io::Result<Running> {
     spawn("relay-accept", Arc::clone(&shared), move |shared| {
         accept(&relay_listener, shared, "relay", serve_helper)
     });
+    if let Some(listener) = control_listener {
+        spawn("control-accept", Arc::clone(&shared), move |shared| {
+            control::accept(&listener, shared)
+        });
+        spawn(
+            "control-status",
+            Arc::clone(&shared),
+            control::report_status,
+        );
+    }
     spawn("tobiid", shared, follow_driver);
     Ok(running)
 }
@@ -462,6 +503,14 @@ fn read_hello(stream: &mut TcpStream) -> io::Result<Hello> {
     })
 }
 
+/// A profile as the daemon runs it: the command line can turn smoothing off.
+fn effective(config: &Config, mut profile: Profile) -> Profile {
+    if config.force_unsmoothed {
+        profile.smoothing.enabled = false;
+    }
+    profile
+}
+
 /// Give a game process its pipeline, from its own profile or the default.
 /// Returns a line for the log when the process is new or changed.
 fn register_game(shared: &Shared, state: &mut State, pid: u32, executable: &str) -> Option<String> {
@@ -472,10 +521,7 @@ fn register_game(shared: &Shared, state: &mut State, pid: u32, executable: &str)
     {
         return None;
     }
-    let mut profile = *state.tuning.profile_for(executable);
-    if shared.config.force_unsmoothed {
-        profile.smoothing.enabled = false;
-    }
+    let profile = effective(&shared.config, *state.tuning.profile_for(executable));
     let source = if executable.is_empty() {
         "the default profile (this helper does not report the game)".to_owned()
     } else if state.tuning.has_profile(executable) {
@@ -584,7 +630,10 @@ fn follow_driver(shared: Arc<Shared>) {
             Ok(stream) => {
                 reported = false;
                 shared.log(&format!("tobiid: connected to {}", path.display()));
-                if let Err(err) = driver_loop(&shared, stream) {
+                shared.lock().driver_connected = true;
+                let ended = driver_loop(&shared, stream);
+                shared.lock().driver_connected = false;
+                if let Err(err) = ended {
                     shared.log(&format!("tobiid: connection ended: {err}"));
                 }
             }
@@ -694,6 +743,19 @@ fn on_presence(shared: &Shared, host_micros: i64, status: u8) {
 }
 
 fn on_pose(shared: &Shared, pose: &HeadPose) {
+    let watchers = shared.lock().watchers.clone();
+    if !watchers.is_empty() {
+        control::send_pose(
+            shared,
+            &watchers,
+            RawPose {
+                micros: pose.host_micros,
+                position_mm: pose.position_mm,
+                rotation_deg: pose.rotation_rad.map(f32::to_degrees),
+                valid: pose.valid(),
+            },
+        );
+    }
     if !pose.valid() {
         // The validity fields' width in the services message is not known
         // yet, so an invalid pose is dropped rather than sent as valid.
@@ -707,6 +769,8 @@ fn on_pose(shared: &Shared, pose: &HeadPose) {
     let (targets, offset) = {
         let mut state = shared.lock();
         let state = &mut *state;
+        state.last_pose = Some(Instant::now());
+        state.preview.process(pose.host_micros, input);
         // Every known game's pipeline sees every pose, wanted or not, so its
         // filter is warm when the game asks for head pose.
         let mut targets = Vec::new();
@@ -765,6 +829,7 @@ fn on_display_area(shared: &Shared, status: u8, payload: &[u8]) {
         let mut state = shared.lock();
         state.area_reply = Some(reply);
         state.display = Some(display);
+        state.display_width_mm = Some(width);
     }
     shared.log(&format!("tobiid: display area is {width:.0} mm wide"));
 }

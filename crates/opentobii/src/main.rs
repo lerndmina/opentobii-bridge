@@ -45,6 +45,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Config, String> {
     if let Some(path) = settings_path {
         config.tuning = opentobii_core::config::Config::load(&path)
             .map_err(|err| format!("{}: {err}", path.display()))?;
+        config.settings_path = Some(path);
     }
     Ok(config)
 }

@@ -1,7 +1,7 @@
 //! End to end on throwaway ports: a fake `tobiid`, a fake game DLL on the
 //! TTP side and a fake helper on the services side.
 
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use opentobii::daemon::{monotonic_micros, start, Config, Running};
 use opentobii_core::config::Config as Tuning;
+use opentobii_core::control::{Line, Request};
 use opentobii_core::pipeline::{Axis, Profile, Smoothing};
 use opentobii_proto::frames::{display_area_corners, keyed_values, Keyed};
 use opentobii_proto::sesp;
@@ -79,6 +80,8 @@ fn rig(tuning: Tuning) -> Rig {
         tobiid_socket: socket,
         tuning,
         force_unsmoothed: false,
+        settings_path: Some(dir.join("config.toml")),
+        control_socket: Some(dir.join("opentobii.sock")),
         monitor_index: None,
     })
     .unwrap();
@@ -498,4 +501,256 @@ fn a_game_with_its_own_profile_gets_that_profile() {
         "5 degrees beyond it, doubled"
     );
     assert!((yaw_for(-6.0) + 10.0).abs() < 1e-3);
+}
+
+// --- the control socket -----------------------------------------------------
+
+struct Control {
+    reader: BufReader<UnixStream>,
+    writer: UnixStream,
+}
+
+impl Control {
+    fn connect(rig: &Rig) -> Self {
+        let path = rig
+            .running
+            .control_socket
+            .clone()
+            .expect("a control socket");
+        let writer = UnixStream::connect(path).unwrap();
+        writer.set_read_timeout(Some(TIMEOUT)).unwrap();
+        let reader = BufReader::new(writer.try_clone().unwrap());
+        Self { reader, writer }
+    }
+
+    fn send_text(&mut self, text: &str) {
+        self.writer.write_all(text.as_bytes()).unwrap();
+        self.writer.write_all(b"\n").unwrap();
+    }
+
+    fn line(&mut self) -> Line {
+        let mut text = String::new();
+        self.reader.read_line(&mut text).unwrap();
+        serde_json::from_str(&text).unwrap_or_else(|err| panic!("{err}: {text:?}"))
+    }
+
+    fn ask(&mut self, request: &Request) -> Line {
+        self.send_text(&serde_json::to_string(request).unwrap());
+        self.line()
+    }
+}
+
+/// A fake game that asked for head pose; returns its subscription channel.
+fn posing_game(rig: &Rig) -> (TcpStream, TcpStream) {
+    let mut commands = connect(rig.running.relay_addr);
+    commands
+        .write_all(&helper_hello(sesp::CHANNEL_COMMAND, 1))
+        .unwrap();
+    let mut subscription = connect(rig.running.relay_addr);
+    subscription
+        .write_all(&helper_hello(sesp::CHANNEL_SUBSCRIPTION, 2))
+        .unwrap();
+    let start = sesp::build(1, sesp::T_HEAD_POSE_START, sesp::Table::new());
+    commands.write_all(&sesp::frame(&start)).unwrap();
+    read_sesp(&mut commands);
+    thread::sleep(Duration::from_millis(50));
+    (commands, subscription)
+}
+
+fn send_yaw(rig: &mut Rig, degrees: f32) {
+    let pose = HeadPose {
+        host_micros: monotonic_micros(),
+        position_valid: true,
+        position_mm: [0.0, 0.0, 700.0],
+        rotation_valid: [true; 3],
+        rotation_rad: [0.0, degrees.to_radians(), 0.0],
+    };
+    rig.driver
+        .write_all(&tobiid::frame(&head_pose_body(&pose)))
+        .unwrap();
+}
+
+fn yaw_seen(subscription: &mut TcpStream) -> f32 {
+    let message = read_sesp(subscription);
+    let payload = sesp::parse(&message).unwrap().payload.unwrap();
+    payload.f32(6, 0.0).to_degrees()
+}
+
+#[test]
+fn control_reports_settings_and_what_is_connected() {
+    let rig = rig(unsmoothed());
+    let _game = posing_game(&rig);
+    let mut control = Control::connect(&rig);
+    let Line::State { config, status } = control.ask(&Request::Get) else {
+        panic!("a state line")
+    };
+    assert_eq!(config, unsmoothed());
+    assert!(status.driver_connected);
+    assert!(!status.tracking, "no pose has arrived yet");
+    assert_eq!(status.display_width_mm, Some(600.0));
+    assert_eq!(status.games.len(), 1);
+    assert_eq!(
+        (status.games[0].pid, status.games[0].head_pose),
+        (392, true)
+    );
+    assert!(!status.games[0].own_profile);
+    assert!(status.settings_path.unwrap().ends_with("config.toml"));
+}
+
+#[test]
+fn a_setting_changed_over_control_applies_on_the_next_pose_and_is_saved() {
+    let mut rig = rig(unsmoothed());
+    let (_commands, mut subscription) = posing_game(&rig);
+    let mut control = Control::connect(&rig);
+
+    send_yaw(&mut rig, 6.0);
+    assert!((yaw_seen(&mut subscription) - 6.0).abs() < 1e-3);
+
+    let mut profile = unsmoothed().default;
+    profile.yaw = Axis {
+        dead_zone: 1.0,
+        sensitivity: 2.0,
+        ..Axis::default()
+    };
+    let set = Request::SetProfile {
+        game: None,
+        profile,
+    };
+    assert_eq!(control.ask(&set), Line::Ok);
+
+    send_yaw(&mut rig, 6.0);
+    assert!(
+        (yaw_seen(&mut subscription) - 10.0).abs() < 1e-3,
+        "the very next pose"
+    );
+
+    let saved = Tuning::load(&rig._dir.0.join("config.toml")).unwrap();
+    assert_eq!(saved.default.yaw.sensitivity, 2.0);
+    assert_eq!(saved.default.yaw.dead_zone, 1.0);
+}
+
+#[test]
+fn recentre_makes_the_current_pose_neutral() {
+    let mut rig = rig(unsmoothed());
+    let (_commands, mut subscription) = posing_game(&rig);
+    let mut control = Control::connect(&rig);
+
+    let early = control.ask(&Request::Recentre { game: None });
+    assert!(
+        matches!(early, Line::Error { ref reason } if reason.contains("no head pose")),
+        "{early:?}"
+    );
+
+    send_yaw(&mut rig, 12.0);
+    assert!((yaw_seen(&mut subscription) - 12.0).abs() < 1e-3);
+    let Line::Recentred { neutral } = control.ask(&Request::Recentre { game: None }) else {
+        panic!("a recentred line")
+    };
+    assert!((neutral.rotation[1] - 12.0).abs() < 1e-3);
+    assert_eq!(neutral.position, Some([0.0, 0.0, 700.0]));
+
+    send_yaw(&mut rig, 12.0);
+    assert!(yaw_seen(&mut subscription).abs() < 1e-3);
+    send_yaw(&mut rig, 20.0);
+    assert!((yaw_seen(&mut subscription) - 8.0).abs() < 1e-3);
+}
+
+#[test]
+fn a_game_profile_can_be_added_and_removed_live() {
+    let mut tuning = unsmoothed();
+    tuning.default.yaw.sensitivity = 3.0;
+    let rig = rig(tuning);
+    let mut control = Control::connect(&rig);
+
+    let unknown = control.ask(&Request::Recentre {
+        game: Some("eurotrucks2.exe".into()),
+    });
+    assert!(matches!(unknown, Line::Error { .. }), "{unknown:?}");
+
+    let set = Request::SetProfile {
+        game: Some("C:\\Games\\EuroTrucks2.EXE".into()),
+        profile: unsmoothed().default,
+    };
+    assert_eq!(control.ask(&set), Line::Ok);
+    let Line::State { config, .. } = control.ask(&Request::Get) else {
+        panic!("a state line")
+    };
+    assert!(
+        config.has_profile("eurotrucks2.exe"),
+        "stored under the file name"
+    );
+    assert_eq!(config.profile_for("eurotrucks2.exe").yaw.sensitivity, 1.0);
+
+    let delete = Request::DeleteProfile {
+        game: "eurotrucks2.exe".into(),
+    };
+    assert_eq!(control.ask(&delete), Line::Ok);
+    assert!(matches!(control.ask(&delete), Line::Error { .. }));
+}
+
+#[test]
+fn subscribers_get_raw_poses_and_status() {
+    let mut rig = rig(Tuning::default());
+    let mut control = Control::connect(&rig);
+    assert_eq!(control.ask(&Request::Subscribe), Line::Ok);
+    thread::sleep(Duration::from_millis(50));
+
+    send_yaw(&mut rig, 7.0);
+    let Line::Pose(pose) = control.line() else {
+        panic!("a pose line")
+    };
+    assert!(pose.valid);
+    assert!(
+        (pose.rotation_deg[1] - 7.0).abs() < 1e-3,
+        "unshaped, unsmoothed"
+    );
+    assert_eq!(pose.position_mm, [0.0, 0.0, 700.0]);
+
+    let Line::Status(status) = control.line() else {
+        panic!("a status line")
+    };
+    assert!(status.driver_connected && status.tracking);
+}
+
+#[test]
+fn bad_control_requests_are_answered_not_fatal() {
+    let rig = rig(unsmoothed());
+    let mut control = Control::connect(&rig);
+
+    control.send_text("this is not json");
+    assert!(
+        matches!(control.line(), Line::Error { ref reason } if reason.contains("not a request"))
+    );
+
+    control.send_text(r#"{"cmd":"set_profile","profile":{"yaw":{"dead_zone":-3.0}}}"#);
+    assert!(matches!(control.line(), Line::Error { ref reason } if reason.contains("yaw")));
+
+    control.send_text(r#"{"cmd":"set_profile","profile":{"yaw":{"sensitivty":2.0}}}"#);
+    assert!(matches!(control.line(), Line::Error { .. }));
+
+    let Line::State { config, .. } = control.ask(&Request::Get) else {
+        panic!("still answering")
+    };
+    assert_eq!(config, unsmoothed(), "nothing refused was applied");
+}
+
+#[test]
+fn a_second_daemon_on_the_same_control_socket_does_not_start() {
+    let rig = rig(unsmoothed());
+    let any = SocketAddr::from(([127, 0, 0, 1], 0));
+    let second = start(Config {
+        ttp_addr: any,
+        relay_addr: any,
+        tobiid_socket: rig._dir.0.join("tobiid.sock"),
+        tuning: Tuning::default(),
+        force_unsmoothed: false,
+        settings_path: None,
+        control_socket: rig.running.control_socket.clone(),
+        monitor_index: None,
+    });
+    let err = second.expect_err("the socket is taken");
+    assert!(
+        err.to_string().contains("another opentobii daemon"),
+        "{err}"
+    );
 }
