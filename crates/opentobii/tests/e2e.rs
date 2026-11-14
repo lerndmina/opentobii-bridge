@@ -1,0 +1,303 @@
+//! End to end on throwaway ports: a fake `tobiid`, a fake game DLL on the
+//! TTP side and a fake helper on the services side.
+
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpStream};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::PathBuf;
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+use opentobii::daemon::{monotonic_micros, start, Config, Running};
+use opentobii_core::smooth::Settings;
+use opentobii_proto::frames::{display_area_corners, keyed_values, Keyed};
+use opentobii_proto::tobiid::testing::{gaze_raw_body, head_pose_body, presence_body};
+use opentobii_proto::tobiid::{self, GazeRaw, HeadPose, RawEye};
+use opentobii_proto::ttp::{self, Message};
+use opentobii_proto::sesp;
+
+const AREA: [[f32; 3]; 3] = [[-300.0, 340.0, 100.0], [300.0, 340.0, 100.0], [-300.0, 5.0, -2.0]];
+const QPC: u64 = 5_000_000_000;
+const TIMEOUT: Duration = Duration::from_secs(3);
+
+struct Rig {
+    running: Running,
+    /// The fake driver's end of the daemon's connection.
+    driver: UnixStream,
+    /// What the daemon sent the driver first.
+    greeting: Vec<u8>,
+    _dir: TempDir,
+}
+
+struct TempDir(PathBuf);
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn rig(smoothing: Option<Settings>) -> Rig {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("opentobii-e2e-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let socket = dir.join("tobiid.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        // SUBSCRIBE (4 + 5 bytes) then the display area REQUEST (4 + 6).
+        let mut greeting = vec![0u8; 19];
+        stream.read_exact(&mut greeting).unwrap();
+        stream.write_all(&tobiid::frame(&[tobiid::TAG_SUBSCRIBED, 1])).unwrap();
+        let mut reply = vec![tobiid::TAG_REPLY, 1, 0, 0, 0, tobiid::STATUS_OK];
+        reply.extend(AREA.iter().flatten().flat_map(|v| v.to_le_bytes()));
+        stream.write_all(&tobiid::frame(&reply)).unwrap();
+        tx.send((stream, greeting)).unwrap();
+    });
+
+    let any = SocketAddr::from(([127, 0, 0, 1], 0));
+    let running = start(Config { ttp_addr: any, relay_addr: any, tobiid_socket: socket, smoothing, monitor_index: None }).unwrap();
+    let (driver, greeting) = rx.recv_timeout(TIMEOUT).expect("the daemon connects to the driver");
+    let deadline = Instant::now() + TIMEOUT;
+    while !running.has_display_area() {
+        assert!(Instant::now() < deadline, "the daemon takes the display area");
+        thread::sleep(Duration::from_millis(5));
+    }
+    Rig { running, driver, greeting, _dir: TempDir(dir) }
+}
+
+fn connect(addr: SocketAddr) -> TcpStream {
+    let stream = TcpStream::connect(addr).unwrap();
+    stream.set_read_timeout(Some(TIMEOUT)).unwrap();
+    stream
+}
+
+fn read_ttp(stream: &mut TcpStream) -> Message {
+    let mut head = [0u8; ttp::HEADER_LEN];
+    stream.read_exact(&mut head).unwrap();
+    let length = ttp::Header::decode(&head).unwrap().payload_len as usize;
+    let mut all = head.to_vec();
+    all.resize(ttp::HEADER_LEN + length, 0);
+    stream.read_exact(&mut all[ttp::HEADER_LEN..]).unwrap();
+    Message::decode(&all).unwrap()
+}
+
+fn command(stream: &mut TcpStream, seq: u32, id: u32, payload: Vec<u8>) -> Message {
+    let request = Message { marker: ttp::MARKER_COMMAND, seq, status: 0, id, error: 0, payload };
+    stream.write_all(&request.encode()).unwrap();
+    read_ttp(stream)
+}
+
+fn read_sesp(stream: &mut TcpStream) -> Vec<u8> {
+    let mut head = [0u8; sesp::FRAME_HEAD_LEN];
+    stream.read_exact(&mut head).unwrap();
+    let size = u32::from_le_bytes([head[4], head[5], head[6], head[7]]) as usize;
+    let mut buffer = vec![0u8; size];
+    stream.read_exact(&mut buffer).unwrap();
+    buffer
+}
+
+fn helper_hello(channel: u32, slot: u32) -> Vec<u8> {
+    let monitor = b"DISPLAY\\TEST\\1";
+    let mut hello = b"OTB1".to_vec();
+    for word in [channel, 392, slot] {
+        hello.extend_from_slice(&word.to_le_bytes());
+    }
+    hello.extend_from_slice(&QPC.to_le_bytes());
+    hello.extend_from_slice(&1u32.to_le_bytes());
+    hello.push(1);
+    hello.extend_from_slice(&(monitor.len() as u16).to_le_bytes());
+    hello.extend_from_slice(monitor);
+    hello
+}
+
+fn sample(host_micros: i64) -> GazeRaw {
+    let eye = RawEye {
+        gaze_origin_mm: [-30.0, 20.0, 650.0],
+        gaze_origin_in_track_box: [0.5, 0.5, 0.5],
+        gaze_point_mm: [10.0, 100.0, 50.0],
+        gaze_point_on_display: [0.25, 0.75],
+        pupil_diameter_mm: 3.5,
+        status: 0,
+    };
+    GazeRaw {
+        device_micros: 1,
+        left: eye,
+        right: eye,
+        combined_on_display: [0.125, 0.875],
+        combined_validity: 1,
+        key_11: Some(4),
+        frame_counter: Some(99),
+        left_origin_flag: Some(1),
+        right_origin_flag: Some(1),
+        host_micros: Some(host_micros),
+        responsive_on_display: Some([0.125, 0.875]),
+        responsive_validity: 1,
+        ..GazeRaw::default()
+    }
+}
+
+#[test]
+fn subscribes_and_asks_for_the_display_area() {
+    let rig = rig(None);
+    let streams = tobiid::STREAM_GAZE_RAW | tobiid::STREAM_PRESENCE | tobiid::STREAM_HEAD_POSE;
+    let mut expected = tobiid::frame(&tobiid::subscribe(streams));
+    expected.extend(tobiid::frame(&tobiid::request(1, tobiid::KIND_DISPLAY_AREA_GET, &[])));
+    assert_eq!(rig.greeting, expected);
+}
+
+#[test]
+fn the_game_is_told_the_drivers_display_area_and_recorded_identity() {
+    let rig = rig(None);
+    let mut game = connect(rig.running.ttp_addr);
+    let area = command(&mut game, 1, 1430, Vec::new());
+    assert_eq!((area.marker, area.seq, area.error), (ttp::MARKER_RESPONSE, 1, 0));
+    assert_eq!(display_area_corners(&area.payload), Some(AREA.map(|c| c.map(f64::from))));
+
+    let identity = command(&mut game, 2, 1420, Vec::new());
+    assert_eq!(identity.error, 0);
+    assert!(!identity.payload.is_empty());
+
+    let unlock = command(&mut game, 3, 1600, Vec::new());
+    assert_eq!((unlock.error, unlock.payload.len()), (0, 29));
+
+    let unknown = command(&mut game, 4, 1460, Vec::new());
+    assert_eq!(unknown.error, ttp::ERROR_UNSUPPORTED);
+}
+
+#[test]
+fn live_gaze_and_presence_reach_a_subscribed_game() {
+    let mut rig = rig(None);
+    let mut game = connect(rig.running.ttp_addr);
+    for (seq, stream) in [(1, 0x504u32), (2, 0x500)] {
+        let reply = command(&mut game, seq, 1220, ttp::payload(&[&ttp::u32_item(stream)]));
+        assert_eq!(reply.error, 0);
+    }
+    // The subscription is registered after its reply is written.
+    thread::sleep(Duration::from_millis(50));
+
+    let host = monotonic_micros();
+    rig.driver.write_all(&tobiid::frame(&presence_body(host, tobiid::PRESENCE_PRESENT))).unwrap();
+    rig.driver.write_all(&tobiid::frame(&gaze_raw_body(&sample(host)))).unwrap();
+
+    let presence = read_ttp(&mut game);
+    assert_eq!((presence.marker, presence.id), (ttp::MARKER_STREAM, 0x504));
+    assert_eq!(keyed_values(&presence.payload)[&2], Keyed::Int(2));
+
+    let gaze = read_ttp(&mut game);
+    assert_eq!((gaze.marker, gaze.id), (ttp::MARKER_STREAM, 0x500));
+    let values = keyed_values(&gaze.payload);
+    assert_eq!(values[&0x1C], Keyed::Point(vec![0.125, 0.875]));
+    assert_eq!(values[&0x14], Keyed::Int(99));
+    // No helper has said hello, so the host clock is passed on as it is.
+    assert_eq!(values[&0x01], Keyed::Int(host as u64));
+    // The eye origin is placed in the display frame of the driver's area.
+    let Keyed::Point(origin) = &values[&0x22] else { panic!("0x22 is a point") };
+    assert!((origin[0] - -30.0).abs() < 1e-3, "{origin:?}");
+    assert_eq!(rig.running.stats().gaze_frames.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+    // After a stream stop, no more gaze frames.
+    assert_eq!(command(&mut game, 3, 1230, ttp::payload(&[&ttp::u32_item(0x500)])).error, 0);
+    thread::sleep(Duration::from_millis(50));
+    rig.driver.write_all(&tobiid::frame(&gaze_raw_body(&sample(host)))).unwrap();
+    game.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+    assert!(game.read(&mut [0u8; 1]).is_err(), "nothing arrives after the stop");
+}
+
+#[test]
+fn live_head_pose_reaches_the_game_on_the_games_clock() {
+    let mut rig = rig(None);
+    let mut commands = connect(rig.running.relay_addr);
+    commands.write_all(&helper_hello(sesp::CHANNEL_COMMAND, 1)).unwrap();
+    let mut subscription = connect(rig.running.relay_addr);
+    subscription.write_all(&helper_hello(sesp::CHANNEL_SUBSCRIPTION, 2)).unwrap();
+
+    commands.write_all(&sesp::frame(&sesp::build(1, sesp::T_DISPLAY_INFO, sesp::Table::new()))).unwrap();
+    let info = read_sesp(&mut commands);
+    let info = sesp::parse(&info).unwrap();
+    assert_eq!(info.kind, sesp::T_DISPLAY_INFO_RESPONSE);
+    assert_eq!(info.payload.unwrap().string(1).as_deref(), Some("DISPLAY\\TEST\\1"));
+
+    commands.write_all(&sesp::frame(&sesp::build(2, sesp::T_HEAD_POSE_START, sesp::Table::new()))).unwrap();
+    let started = read_sesp(&mut commands);
+    assert_eq!(sesp::parse(&started).unwrap().kind, sesp::T_HEAD_POSE_START_RESPONSE);
+    thread::sleep(Duration::from_millis(50));
+
+    let host = monotonic_micros();
+    let pose = |valid: bool| HeadPose {
+        host_micros: host,
+        position_valid: true,
+        position_mm: [10.0, 20.0, 600.0],
+        rotation_valid: [valid; 3],
+        rotation_rad: [0.1, -0.2, 0.05],
+    };
+    rig.driver.write_all(&tobiid::frame(&head_pose_body(&pose(false)))).unwrap();
+    rig.driver.write_all(&tobiid::frame(&head_pose_body(&pose(true)))).unwrap();
+
+    let message = read_sesp(&mut subscription);
+    let parsed = sesp::parse(&message).unwrap();
+    assert_eq!((parsed.kind, parsed.sequence), (sesp::T_HEAD_POSE, 1));
+    let payload = parsed.payload.unwrap();
+    assert_eq!([2, 3, 4].map(|n| payload.f32(n, 0.0)), [10.0, 20.0, 600.0]);
+    assert_eq!(payload.f32(6, 0.0), -0.2);
+    let micros = (u64::from(payload.u32(0, 0)) << 32) | u64::from(payload.u32(1, 0));
+    // The helper said the game's counter read QPC when it connected.
+    assert!(micros.abs_diff(QPC) < 2_000_000, "{micros}");
+    let stats = rig.running.stats();
+    assert_eq!(stats.poses_dropped.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(stats.poses_sent.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
+
+#[test]
+fn smoothing_steadies_a_noisy_pose_before_it_reaches_the_game() {
+    let mut rig = rig(Some(Settings::default()));
+    let mut commands = connect(rig.running.relay_addr);
+    commands.write_all(&helper_hello(sesp::CHANNEL_COMMAND, 1)).unwrap();
+    let mut subscription = connect(rig.running.relay_addr);
+    subscription.write_all(&helper_hello(sesp::CHANNEL_SUBSCRIPTION, 2)).unwrap();
+    commands.write_all(&sesp::frame(&sesp::build(1, sesp::T_HEAD_POSE_START, sesp::Table::new()))).unwrap();
+    read_sesp(&mut commands);
+    thread::sleep(Duration::from_millis(50));
+
+    // Yaw alternating half a degree either side of zero, 30 ms apart.
+    let host = monotonic_micros();
+    let swing = 0.5f32.to_radians();
+    let mut seen = Vec::new();
+    for i in 0..40i64 {
+        let yaw = if i % 2 == 0 { swing } else { -swing };
+        let pose = HeadPose {
+            host_micros: host + i * 30_200,
+            position_valid: true,
+            position_mm: [0.0, 0.0, 700.0],
+            rotation_valid: [true; 3],
+            rotation_rad: [0.0, yaw, 0.0],
+        };
+        rig.driver.write_all(&tobiid::frame(&head_pose_body(&pose))).unwrap();
+        let message = read_sesp(&mut subscription);
+        seen.push(sesp::parse(&message).unwrap().payload.unwrap().f32(6, 0.0));
+    }
+    let late_swing = seen[20..].iter().fold(0.0f32, |max, v| max.max(v.abs()));
+    assert!(late_swing < swing / 2.0, "swing {late_swing} of {swing}");
+}
+
+#[test]
+fn garbage_from_a_client_closes_that_connection_only() {
+    let rig = rig(None);
+    let mut bad = connect(rig.running.ttp_addr);
+    let mut header = Vec::new();
+    for word in [ttp::MARKER_COMMAND, 1, 0, 1000, 0, u32::MAX] {
+        header.extend_from_slice(&word.to_be_bytes());
+    }
+    bad.write_all(&header).unwrap();
+    assert_eq!(bad.read(&mut [0u8; 1]).unwrap_or(0), 0, "an oversized command is hung up on");
+
+    let mut bad_helper = connect(rig.running.relay_addr);
+    bad_helper.write_all(&[0xAA; 28]).unwrap();
+    assert_eq!(bad_helper.read(&mut [0u8; 1]).unwrap_or(0), 0);
+
+    let mut good = connect(rig.running.ttp_addr);
+    assert_eq!(command(&mut good, 1, 1000, Vec::new()).error, 0);
+}

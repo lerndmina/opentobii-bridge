@@ -1,0 +1,15 @@
+[package]
+name = "opentobii"
+description = "Bridge from a Tobii Eye Tracker 5 on Linux to games that use Tobii's game integration DLL under Proton"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+opentobii-core = { path = "../opentobii-core" }
+opentobii-proto = { path = "../opentobii-proto" }
+rustix = { version = "1.1", features = ["time"] }
+
+[lints]
+workspace = true
