@@ -14,8 +14,8 @@ This repo does not contain a USB driver. It builds on an existing Linux driver f
 | Proof | What it shows | State |
 |---|---|---|
 | 1 | The game's Tobii DLL connects to a Linux listener on `127.0.0.1:4455` under Proton | Passed 2026-11-14, ETS2 with Tobii DLL 7.3.0.14, Proton-CachyOS |
-| 2 | Gaze reaches the game | Responder written; needs a run against a fresh game start |
-| 3 | Head pose reaches the game through a helper in the prefix | Not started |
+| 2 | Gaze reaches the game | Partly. On a fresh start the DLL ran its whole device start against the responder and accepted every reply (2026-11-14). The game then did not select the tracker: it matches trackers to monitors by a display id that only the helper can supply |
+| 3 | Helper in the prefix supplies display id and head pose | Protocol codec written (`opentobii_bridge/sesp.py`); helper not built |
 | 4 | The helper starts by itself as a service in the prefix | Not started |
 
 ## Proof 1
