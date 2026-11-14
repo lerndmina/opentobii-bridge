@@ -19,6 +19,15 @@ global Theme {
     out property <length> radius: 10px;
 }
 
+export struct GameRow {
+    name: string,
+    state: string,
+    // What the main button does: "Set up", "Update", or empty for none.
+    action: string,
+    removable: bool,
+    busy: bool,
+}
+
 export struct AxisRow {
     name: string,
     dead-zone: float,
@@ -385,6 +394,15 @@ export component App inherits Window {
     in property <float> look-roll;
     in property <string> look-range-text;
 
+    in property <string> service-text;
+    in property <bool> service-available;
+    in property <bool> service-active;
+    in property <bool> service-enabled;
+    in property <bool> service-busy;
+
+    in property <[GameRow]> games;
+    in property <string> games-text;
+
     in property <bool> calibration-available;
     in property <string> calibration-text;
     in property <[string]> monitors;
@@ -412,6 +430,12 @@ export component App inherits Window {
     callback reset-profile();
     callback recentre();
     callback calibrate();
+    callback service-start();
+    callback service-stop();
+    callback service-restart();
+    callback service-autostart(bool);
+    callback game-action(int);
+    callback game-remove(int);
     callback overlay-toggled(bool);
     callback overlay-style-selected(int);
     callback overlay-color-selected(int);
@@ -498,19 +522,33 @@ export component App inherits Window {
         }
 
         if root.notice != "": Rectangle {
-            height: 34px;
+            height: 40px;
             border-radius: 8px;
             background: #e5695f22;
             border-width: 1px;
             border-color: #e5695f66;
-            Text {
-                x: 14px;
-                width: parent.width - 28px;
-                text: root.notice;
-                color: #f0a59e;
-                font-size: 12px;
-                vertical-alignment: center;
-                overflow: elide;
+            HorizontalLayout {
+                padding-left: 14px;
+                padding-right: 6px;
+                spacing: 10px;
+                Text {
+                    text: root.notice;
+                    color: #f0a59e;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+                if !root.daemon-connected && root.service-available: VerticalLayout {
+                    alignment: center;
+                    Button {
+                        text: root.service-busy ? "Starting…" : "Start it";
+                        enabled: !root.service-busy;
+                        clicked => {
+                            root.service-start();
+                        }
+                    }
+                }
             }
         }
 
@@ -590,6 +628,107 @@ export component App inherits Window {
                                 enabled: root.can-delete;
                                 clicked => {
                                     root.delete-profile();
+                                }
+                            }
+                        }
+                    }
+
+                    Card {
+                        title: "Daemon";
+                        hint: "";
+                        vertical-stretch: 0;
+                        Text {
+                            text: root.service-text;
+                            color: Theme.muted;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                        if root.service-available: Switch {
+                            text: "Start at login";
+                            checked: root.service-enabled;
+                            enabled: !root.service-busy;
+                            toggled => {
+                                root.service-autostart(self.checked);
+                            }
+                        }
+                        if root.service-available: HorizontalLayout {
+                            spacing: 8px;
+                            if !root.daemon-connected: Button {
+                                text: "Start";
+                                primary: true;
+                                horizontal-stretch: 1;
+                                enabled: !root.service-busy;
+                                clicked => {
+                                    root.service-start();
+                                }
+                            }
+                            if root.service-active: Button {
+                                text: "Restart";
+                                horizontal-stretch: 1;
+                                enabled: !root.service-busy;
+                                clicked => {
+                                    root.service-restart();
+                                }
+                            }
+                            if root.service-active: Button {
+                                text: "Stop";
+                                horizontal-stretch: 1;
+                                enabled: !root.service-busy;
+                                clicked => {
+                                    root.service-stop();
+                                }
+                            }
+                        }
+                    }
+
+                    Card {
+                        title: "Games";
+                        hint: "";
+                        vertical-stretch: 0;
+                        if root.games-text != "": Text {
+                            text: root.games-text;
+                            color: Theme.muted;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                        for game[i] in root.games: Rectangle {
+                            background: Theme.inset;
+                            border-radius: 8px;
+                            VerticalLayout {
+                                padding: 10px;
+                                spacing: 6px;
+                                Text {
+                                    text: game.name;
+                                    color: Theme.text;
+                                    font-size: 13px;
+                                    font-weight: 600;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: game.state;
+                                    color: Theme.muted;
+                                    font-size: 12px;
+                                    wrap: word-wrap;
+                                }
+                                if game.action != "" || game.removable: HorizontalLayout {
+                                    spacing: 8px;
+                                    if game.action != "": Button {
+                                        text: game.action;
+                                        primary: true;
+                                        horizontal-stretch: 1;
+                                        enabled: !game.busy;
+                                        clicked => {
+                                            root.game-action(i);
+                                        }
+                                    }
+                                    if game.removable: Button {
+                                        text: "Remove";
+                                        horizontal-stretch: 1;
+                                        enabled: !game.busy;
+                                        clicked => {
+                                            root.game-remove(i);
+                                        }
+                                    }
                                 }
                             }
                         }

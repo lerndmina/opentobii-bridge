@@ -14,6 +14,7 @@ pub mod gui;
 pub mod overlay;
 pub mod prefix;
 mod recorded;
+pub mod service;
 pub mod steam;
 
 pub use daemon::{start, Config, Running};

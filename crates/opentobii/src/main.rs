@@ -6,7 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 use opentobii::steam::{self, Game};
-use opentobii::{prefix, start, Config};
+use opentobii::{prefix, service, start, Config};
 use opentobii_core::control::{self, Line, Request};
 
 const USAGE: &str = "\
@@ -31,6 +31,10 @@ opentobii: a Tobii Eye Tracker 5 for games under Proton
   opentobii status
       Show what the running daemon is connected to.
 
+  opentobii service [start|stop|restart|enable|disable]
+      Run the daemon in the background through your user's systemd, and
+      choose whether it starts at login. With no word, show its state.
+
   opentobii gui
       Open the tuning window: dead zone, smoothing, sensitivity, recentre.
 
@@ -49,6 +53,7 @@ fn main() -> ExitCode {
         Some("install") => install(args),
         Some("uninstall") => uninstall(args),
         Some("status") => status(),
+        Some("service") => service_command(args),
         #[cfg(feature = "gui")]
         Some("gui") => opentobii::gui::run(),
         #[cfg(feature = "overlay")]
@@ -214,6 +219,28 @@ fn uninstall(mut args: impl Iterator<Item = String>) -> CommandResult {
     }
     prefix::uninstall(&target).map_err(|err| err.to_string())?;
     println!("Removed the helper for {name}.");
+    Ok(())
+}
+
+fn service_command(mut args: impl Iterator<Item = String>) -> CommandResult {
+    match args.next().as_deref() {
+        Some("start") => service::start()?,
+        Some("stop") => service::stop()?,
+        Some("restart") => service::restart()?,
+        Some("enable") => service::set_enabled(true)?,
+        Some("disable") => service::set_enabled(false)?,
+        Some(other) => return Err(format!("service: unknown word `{other}`")),
+        None => {}
+    }
+    let state = service::state();
+    if !state.systemd {
+        return Err(
+            "this system has no systemd for your user; run `opentobii daemon` instead".into(),
+        );
+    }
+    let yes_no = |flag: bool| if flag { "yes" } else { "no" };
+    println!("Running:         {}", yes_no(state.active));
+    println!("Starts at login: {}", yes_no(state.enabled));
     Ok(())
 }
 

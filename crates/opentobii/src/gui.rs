@@ -15,6 +15,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::steam;
+use crate::{prefix, service};
 use opentobii_core::config::Config;
 use opentobii_core::control::{self, Line, RawPose, Request, Status};
 use opentobii_core::overlay::{self, Overlay, Style};
@@ -57,6 +59,14 @@ enum Event {
     Calibration(Option<Calibration>),
     /// The calibration tool finished, with what to tell the user.
     Calibrated(String),
+    /// What systemd says about the daemon.
+    Service(service::State),
+    /// A start, stop or autostart change finished; an error if it failed.
+    ServiceDone(Result<(), String>),
+    /// The Steam games that can use the tracker, and their helpers.
+    Games(Vec<GameInfo>),
+    /// A set-up or removal finished for the game with this app id.
+    GameDone(String, Result<(), String>),
 }
 
 /// What the window asks the daemon to do.
@@ -169,6 +179,90 @@ fn run_calibration(monitor: Option<String>, keep_display_setup: bool, events: &S
     };
     let _ = events.send(Event::Calibrated(message));
     let _ = events.send(Event::Calibration(read_calibration()));
+}
+
+// --- games --------------------------------------------------------------------
+
+/// One Steam game that ships Tobii's DLL, and the helper in its prefix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GameInfo {
+    app_id: String,
+    name: String,
+    prefix: std::path::PathBuf,
+    /// `None` when the game has never been run, so it has no prefix yet.
+    helper: Option<Result<prefix::Installed, String>>,
+}
+
+fn read_games() -> Vec<GameInfo> {
+    let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) else {
+        return Vec::new();
+    };
+    steam::games(std::path::Path::new(&home))
+        .into_iter()
+        .map(|game| GameInfo {
+            helper: game
+                .prefix_exists
+                .then(|| prefix::status(&game.prefix).map_err(|err| err.to_string())),
+            app_id: game.app_id,
+            name: game.name,
+            prefix: game.prefix,
+        })
+        .collect()
+}
+
+/// How a game shows in the list: its state in words, the main button's
+/// label (empty for none), and whether Remove is offered.
+fn game_row(game: &GameInfo, note: Option<&str>, busy: bool) -> GameRow {
+    let (state, action, removable) = match &game.helper {
+        None => (
+            "Run the game once, close it, then set it up here.".to_owned(),
+            "",
+            false,
+        ),
+        Some(Err(reason)) => (reason.clone(), "", false),
+        Some(Ok(found)) if found.service_key && found.helper_current => {
+            ("Set up.".to_owned(), "", true)
+        }
+        Some(Ok(found)) if found.service_key && found.helper => {
+            ("Set up with an older helper.".to_owned(), "Update", true)
+        }
+        Some(Ok(found)) if found.service_key || found.helper => {
+            ("Partly set up.".to_owned(), "Repair", true)
+        }
+        Some(Ok(_)) => ("Not set up.".to_owned(), "Set up", false),
+    };
+    let running = matches!(&game.helper, Some(Ok(found)) if found.in_use);
+    let mut state = state;
+    if running && (!action.is_empty() || removable) {
+        state.push_str(" Close the game to change this.");
+    }
+    if let Some(note) = note {
+        state = note.to_owned();
+    }
+    GameRow {
+        name: game.name.as_str().into(),
+        state: state.into(),
+        action: if running { "".into() } else { action.into() },
+        removable: removable && !running,
+        busy,
+    }
+}
+
+/// What the Daemon card says.
+fn service_summary(service: service::State, connected: bool) -> String {
+    if !service.systemd {
+        return "This system has no systemd for your user, so the daemon cannot be managed from here. \
+                Start it with: opentobii daemon"
+            .to_owned();
+    }
+    match (connected, service.active) {
+        (true, true) => "Running.".to_owned(),
+        (true, false) => "Running, but started by hand and not by this window. \
+                          Stop it where it was started."
+            .to_owned(),
+        (false, true) => "Starting…".to_owned(),
+        (false, false) => "Not running.".to_owned(),
+    }
 }
 
 // --- pure helpers, tested without a window ---------------------------------
@@ -339,6 +433,14 @@ struct Ui {
     failure: Option<String>,
     calibration: Option<Calibration>,
     calibration_note: String,
+    service: service::State,
+    service_busy: bool,
+    games: Vec<GameInfo>,
+    /// App ids with a set-up or removal under way.
+    games_busy: Vec<String>,
+    /// The last result for a game, by app id, shown in place of its state.
+    game_notes: Vec<(String, String)>,
+    game_rows: Rc<VecModel<GameRow>>,
     events: Sender<Event>,
     /// The newest unsent change, and when the last one went out.
     pending: Option<(Option<String>, Profile)>,
@@ -449,6 +551,7 @@ impl Ui {
 
     fn refresh_all(&mut self) {
         self.refresh_chrome();
+        self.refresh_service();
         self.refresh_overlay();
         self.refresh_settings();
         self.refresh_live();
@@ -509,6 +612,89 @@ impl Ui {
         thread::spawn(move || run_calibration(monitor, keep, &events));
     }
 
+    /// The Daemon card.
+    fn refresh_service(&self) {
+        let app = &self.app;
+        app.set_service_available(self.service.systemd);
+        app.set_service_active(self.service.active);
+        app.set_service_enabled(self.service.enabled);
+        app.set_service_busy(self.service_busy);
+        app.set_service_text(service_summary(self.service, self.connected).into());
+    }
+
+    /// The Games card.
+    fn refresh_games(&self) {
+        let rows: Vec<GameRow> = self
+            .games
+            .iter()
+            .map(|game| {
+                let note = self
+                    .game_notes
+                    .iter()
+                    .find(|(id, _)| *id == game.app_id)
+                    .map(|(_, note)| note.as_str());
+                game_row(game, note, self.games_busy.contains(&game.app_id))
+            })
+            .collect();
+        self.app.set_games_text(
+            if rows.is_empty() {
+                "No installed Steam game with Tobii support was found."
+            } else {
+                ""
+            }
+            .into(),
+        );
+        if self.game_rows.row_count() == rows.len() {
+            for (index, row) in rows.into_iter().enumerate() {
+                if self.game_rows.row_data(index).as_ref() != Some(&row) {
+                    self.game_rows.set_row_data(index, row);
+                }
+            }
+        } else {
+            self.game_rows.set_vec(rows);
+        }
+    }
+
+    /// Set up or remove the helper for the game in row `index`.
+    fn change_game(&mut self, index: usize, remove: bool) {
+        let Some(game) = self.games.get(index).cloned() else {
+            return;
+        };
+        if self.games_busy.contains(&game.app_id) {
+            return;
+        }
+        self.games_busy.push(game.app_id.clone());
+        self.game_notes.retain(|(id, _)| *id != game.app_id);
+        self.refresh_games();
+        let events = self.events.clone();
+        thread::spawn(move || {
+            let result = if remove {
+                prefix::uninstall(&game.prefix)
+            } else {
+                prefix::install(&game.prefix, prefix::HELPER).map(|_| ())
+            };
+            let _ = events.send(Event::GameDone(
+                game.app_id,
+                result.map_err(|err| err.to_string()),
+            ));
+            let _ = events.send(Event::Games(read_games()));
+        });
+    }
+
+    /// Run one systemd change in the background.
+    fn change_service(&mut self, change: fn() -> Result<(), String>) {
+        if self.service_busy {
+            return;
+        }
+        self.service_busy = true;
+        self.refresh_service();
+        let events = self.events.clone();
+        thread::spawn(move || {
+            let _ = events.send(Event::ServiceDone(change()));
+            let _ = events.send(Event::Service(service::state()));
+        });
+    }
+
     fn refresh_chrome(&self) {
         let app = &self.app;
         app.set_daemon_connected(self.connected);
@@ -535,7 +721,11 @@ impl Ui {
         app.set_game_connected(!self.status.games.is_empty());
 
         let notice = if !self.connected {
-            "The opentobii daemon is not running. Start it with: opentobii daemon".to_owned()
+            if self.service.systemd {
+                "The opentobii daemon is not running.".to_owned()
+            } else {
+                "The opentobii daemon is not running. Start it with: opentobii daemon".to_owned()
+            }
         } else {
             self.failure.clone().unwrap_or_default()
         };
@@ -691,6 +881,28 @@ impl Ui {
                 self.calibration = calibration;
                 self.refresh_calibration(true);
             }
+            Event::Service(state) => {
+                self.service = state;
+                self.refresh_service();
+                self.refresh_chrome();
+            }
+            Event::ServiceDone(result) => {
+                self.service_busy = false;
+                self.failure = result.err();
+                self.refresh_service();
+                self.refresh_chrome();
+            }
+            Event::Games(games) => {
+                self.games = games;
+                self.refresh_games();
+            }
+            Event::GameDone(app_id, result) => {
+                self.games_busy.retain(|id| *id != app_id);
+                if let Err(reason) = result {
+                    self.game_notes.push((app_id, reason));
+                }
+                self.refresh_games();
+            }
             Event::Calibrated(message) => {
                 self.calibration_note = message;
                 self.app.set_calibrating(false);
@@ -821,6 +1033,26 @@ pub fn run() -> Result<(), String> {
             let _ = events.send(Event::Calibration(read_calibration()));
         }
     });
+    // Keep the Daemon and Games cards current: both can change behind the
+    // window's back.
+    thread::spawn({
+        let events = event_tx.clone();
+        move || loop {
+            if events.send(Event::Service(service::state())).is_err() {
+                return;
+            }
+            thread::sleep(Duration::from_secs(3));
+        }
+    });
+    thread::spawn({
+        let events = event_tx.clone();
+        move || loop {
+            if events.send(Event::Games(read_games())).is_err() {
+                return;
+            }
+            thread::sleep(Duration::from_secs(5));
+        }
+    });
     thread::spawn({
         let events = event_tx.clone();
         move || send_commands(command_rx, events)
@@ -838,6 +1070,9 @@ pub fn run() -> Result<(), String> {
     app.set_rotation(ModelRc::from(Rc::clone(&rotation)));
     app.set_position(ModelRc::from(Rc::clone(&position)));
 
+    let game_rows: Rc<VecModel<GameRow>> = Rc::new(VecModel::default());
+    app.set_games(ModelRc::from(Rc::clone(&game_rows)));
+
     let ui = Rc::new(RefCell::new(Ui {
         app: app.clone_strong(),
         commands: command_tx,
@@ -850,6 +1085,12 @@ pub fn run() -> Result<(), String> {
         failure: None,
         calibration: None,
         calibration_note: String::new(),
+        service: service::State::default(),
+        service_busy: false,
+        games: Vec::new(),
+        games_busy: Vec::new(),
+        game_notes: Vec::new(),
+        game_rows: Rc::clone(&game_rows),
         events: event_tx.clone(),
         pending: None,
         pending_overlay: None,
@@ -1059,6 +1300,58 @@ pub fn run() -> Result<(), String> {
             });
         }
     });
+    app.on_service_start({
+        let ui = Rc::clone(&ui);
+        move || {
+            if let Ok(mut ui) = ui.try_borrow_mut() {
+                ui.change_service(service::start);
+            }
+        }
+    });
+    app.on_service_stop({
+        let ui = Rc::clone(&ui);
+        move || {
+            if let Ok(mut ui) = ui.try_borrow_mut() {
+                ui.change_service(service::stop);
+            }
+        }
+    });
+    app.on_service_restart({
+        let ui = Rc::clone(&ui);
+        move || {
+            if let Ok(mut ui) = ui.try_borrow_mut() {
+                ui.change_service(service::restart);
+            }
+        }
+    });
+    app.on_service_autostart({
+        let ui = Rc::clone(&ui);
+        move |on| {
+            if let Ok(mut ui) = ui.try_borrow_mut() {
+                ui.change_service(if on {
+                    || service::set_enabled(true)
+                } else {
+                    || service::set_enabled(false)
+                });
+            }
+        }
+    });
+    app.on_game_action({
+        let ui = Rc::clone(&ui);
+        move |index| {
+            if let (Ok(mut ui), Ok(index)) = (ui.try_borrow_mut(), usize::try_from(index)) {
+                ui.change_game(index, false);
+            }
+        }
+    });
+    app.on_game_remove({
+        let ui = Rc::clone(&ui);
+        move |index| {
+            if let (Ok(mut ui), Ok(index)) = (ui.try_borrow_mut(), usize::try_from(index)) {
+                ui.change_game(index, true);
+            }
+        }
+    });
     app.on_calibrate({
         let ui = Rc::clone(&ui);
         move || {
@@ -1144,6 +1437,87 @@ pub fn run() -> Result<(), String> {
 mod tests {
     use super::*;
     use opentobii_core::control::GameStatus;
+
+    fn game(helper: Option<Result<prefix::Installed, String>>) -> GameInfo {
+        GameInfo {
+            app_id: "227300".into(),
+            name: "Euro Truck Simulator 2".into(),
+            prefix: "/pfx".into(),
+            helper,
+        }
+    }
+
+    fn found(
+        service_key: bool,
+        helper: bool,
+        helper_current: bool,
+        in_use: bool,
+    ) -> Option<Result<prefix::Installed, String>> {
+        Some(Ok(prefix::Installed {
+            service_key,
+            helper,
+            helper_current,
+            in_use,
+        }))
+    }
+
+    #[test]
+    fn a_game_row_offers_the_one_sensible_next_step() {
+        let row = game_row(&game(found(false, false, false, false)), None, false);
+        assert_eq!((row.action.as_str(), row.removable), ("Set up", false));
+
+        let row = game_row(&game(found(true, true, true, false)), None, false);
+        assert_eq!(
+            (row.state.as_str(), row.action.as_str(), row.removable),
+            ("Set up.", "", true)
+        );
+
+        let row = game_row(&game(found(true, true, false, false)), None, false);
+        assert_eq!((row.action.as_str(), row.removable), ("Update", true));
+
+        let row = game_row(&game(found(true, false, false, false)), None, false);
+        assert_eq!(row.action, "Repair");
+
+        let row = game_row(&game(None), None, false);
+        assert!(row.state.contains("Run the game once") && row.action.is_empty() && !row.removable);
+    }
+
+    #[test]
+    fn a_running_game_cannot_be_changed_and_says_why() {
+        let row = game_row(&game(found(true, true, false, true)), None, false);
+        assert!(row.action.is_empty() && !row.removable);
+        assert!(row.state.contains("Close the game"), "{}", row.state);
+    }
+
+    #[test]
+    fn a_failed_change_is_shown_in_the_row() {
+        let row = game_row(
+            &game(found(false, false, false, false)),
+            Some("disk full"),
+            true,
+        );
+        assert_eq!(row.state, "disk full");
+        assert!(row.busy);
+    }
+
+    #[test]
+    fn the_daemon_card_tells_the_four_states_apart() {
+        let managed = service::State {
+            systemd: true,
+            installed: true,
+            enabled: false,
+            active: true,
+        };
+        let idle = service::State {
+            active: false,
+            ..managed
+        };
+        assert_eq!(service_summary(managed, true), "Running.");
+        assert!(service_summary(idle, true).contains("started by hand"));
+        assert_eq!(service_summary(managed, false), "Starting…");
+        assert_eq!(service_summary(idle, false), "Not running.");
+        assert!(service_summary(service::State::default(), false).contains("opentobii daemon"));
+    }
 
     #[test]
     fn reads_the_calibration_tools_monitor_list() {
