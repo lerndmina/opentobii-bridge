@@ -169,13 +169,30 @@ fn draw_mark(
         return None;
     }
     let [red, green, blue] = rgb.map(f64::from);
+    // The shade depends only on the distance from the centre, so work it out
+    // once per quarter pixel of distance instead of once per pixel.
+    const PER_PIXEL: f64 = 4.0;
+    let steps = (extent * PER_PIXEL).ceil() as usize + 2;
+    let table: Vec<(f64, f64)> = (0..steps)
+        .map(|step| {
+            let (alpha, white) = shade(style, step as f64 / PER_PIXEL, mark.radius);
+            (alpha * strength, white)
+        })
+        .collect();
+    let reach_squared = extent * extent;
     for y in rect.y0..rect.y1 {
         let dy = f64::from(y) + 0.5 - mark.y;
         let row = (y as usize) * (width as usize) * 4;
         for x in rect.x0..rect.x1 {
             let dx = f64::from(x) + 0.5 - mark.x;
-            let (alpha, white) = shade(style, (dx * dx + dy * dy).sqrt(), mark.radius);
-            let alpha = alpha * strength;
+            let squared = dx * dx + dy * dy;
+            if squared >= reach_squared {
+                continue;
+            }
+            let Some(&(alpha, white)) = table.get((squared.sqrt() * PER_PIXEL).round() as usize)
+            else {
+                continue;
+            };
             // Below three steps of 255 a pixel would carry alpha but no
             // colour, which shows as a faint dark box around a soft mark.
             if alpha <= 0.012 {
