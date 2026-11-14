@@ -69,6 +69,8 @@ pub struct Config {
     pub settings_path: Option<PathBuf>,
     /// Where the control socket listens; `None` for no control socket.
     pub control_socket: Option<PathBuf>,
+    /// Run the gaze overlay program while the overlay is switched on.
+    pub manage_overlay: bool,
     /// Which monitor to report to the game; `None` picks the primary.
     pub monitor_index: Option<usize>,
 }
@@ -83,6 +85,7 @@ impl Default for Config {
             force_unsmoothed: false,
             settings_path: None,
             control_socket: Some(opentobii_core::control::socket_path()),
+            manage_overlay: true,
             monitor_index: None,
         }
     }
@@ -192,6 +195,8 @@ struct Shared {
     stats: Stats,
     next_conn: AtomicU64,
     started: Instant,
+    /// Set when the overlay's settings change, to let its keeper try again.
+    overlay_retry: std::sync::atomic::AtomicBool,
 }
 
 impl Shared {
@@ -236,8 +241,11 @@ impl Shared {
         sent
     }
 
-    /// The overlay's settings changed: start, stop or leave it, to match.
-    fn overlay_changed(&self) {}
+    /// The overlay's settings changed. A fresh start is allowed even if it
+    /// kept failing under the old settings.
+    fn overlay_changed(&self) {
+        self.overlay_retry.store(true, Ordering::Relaxed);
+    }
 
     fn forget(&self, id: u64) {
         let mut state = self.lock();
@@ -296,6 +304,7 @@ pub fn start(config: Config) -> io::Result<Running> {
         gaze_template: Template::new(recorded::gaze_frame()),
         presence_template: Template::new(recorded::presence_frame()),
         stats: Stats::default(),
+        overlay_retry: std::sync::atomic::AtomicBool::new(false),
         next_conn: AtomicU64::new(1),
         started: Instant::now(),
         config,
@@ -322,6 +331,9 @@ pub fn start(config: Config) -> io::Result<Running> {
             Arc::clone(&shared),
             control::report_status,
         );
+        if shared.config.manage_overlay {
+            spawn("overlay-keeper", Arc::clone(&shared), keep_overlay);
+        }
     }
     spawn("tobiid", shared, follow_driver);
     Ok(running)
@@ -620,6 +632,79 @@ fn serve_helper(shared: &Shared, mut stream: TcpStream) -> io::Result<()> {
                     shared.lock().posing.remove(&hello.pid);
                 }
                 _ => {}
+            }
+        }
+    }
+}
+
+// --- the gaze overlay -------------------------------------------------------
+
+/// How often the keeper looks at the overlay program.
+const OVERLAY_CHECK_EVERY: Duration = Duration::from_millis(500);
+/// An overlay that exits sooner than this after starting counts as a
+/// failed start.
+const OVERLAY_QUICK_EXIT: Duration = Duration::from_secs(5);
+/// After this many failed starts in a row the keeper stops trying until the
+/// settings change.
+const OVERLAY_MAX_FAILURES: u32 = 3;
+
+/// Keep the overlay program running while the overlay is switched on, and
+/// stopped while it is off. The program is this same executable.
+fn keep_overlay(shared: Arc<Shared>) {
+    let mut child: Option<(std::process::Child, Instant)> = None;
+    let mut failures = 0u32;
+    loop {
+        thread::sleep(OVERLAY_CHECK_EVERY);
+        let wanted = shared.lock().tuning.overlay.enabled;
+        if shared.overlay_retry.swap(false, Ordering::Relaxed) {
+            failures = 0;
+        }
+        if let Some((process, since)) = &mut child {
+            match process.try_wait() {
+                Ok(None) if wanted => {}
+                Ok(None) => {
+                    // Switched off: it exits by itself when told, so only
+                    // one that has not gone after a moment is killed.
+                    thread::sleep(Duration::from_secs(1));
+                    if matches!(process.try_wait(), Ok(None)) {
+                        let _ = process.kill();
+                        let _ = process.wait();
+                    }
+                    child = None;
+                    shared.log("overlay: stopped");
+                }
+                Ok(Some(status)) => {
+                    if wanted && since.elapsed() < OVERLAY_QUICK_EXIT {
+                        failures += 1;
+                        shared.log(&format!(
+                            "overlay: exited at once ({status}), try {failures}"
+                        ));
+                        if failures == OVERLAY_MAX_FAILURES {
+                            shared.log("overlay: giving up until its settings change");
+                        }
+                    } else if wanted {
+                        shared.log(&format!("overlay: exited ({status}); starting it again"));
+                    }
+                    child = None;
+                }
+                Err(_) => child = None,
+            }
+        } else if wanted && failures < OVERLAY_MAX_FAILURES {
+            let started = std::env::current_exe().and_then(|exe| {
+                std::process::Command::new(exe)
+                    .arg("overlay")
+                    .stdin(std::process::Stdio::null())
+                    .spawn()
+            });
+            match started {
+                Ok(process) => {
+                    shared.log("overlay: started");
+                    child = Some((process, Instant::now()));
+                }
+                Err(err) => {
+                    failures += 1;
+                    shared.log(&format!("overlay: cannot start: {err}"));
+                }
             }
         }
     }

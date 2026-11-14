@@ -84,6 +84,7 @@ fn rig(tuning: Tuning) -> Rig {
         settings_path: Some(dir.join("config.toml")),
         control_socket: Some(dir.join("opentobii.sock")),
         monitor_index: None,
+        manage_overlay: false,
     })
     .unwrap();
     let (driver, greeting) = rx
@@ -267,13 +268,17 @@ fn live_gaze_and_presence_reach_a_subscribed_game() {
         panic!("0x22 is a point")
     };
     assert!((origin[0] - -30.0).abs() < 1e-3, "{origin:?}");
-    assert_eq!(
-        rig.running
-            .stats()
-            .gaze_frames
-            .load(std::sync::atomic::Ordering::Relaxed),
-        1
-    );
+    let deadline = Instant::now() + TIMEOUT;
+    while rig
+        .running
+        .stats()
+        .gaze_frames
+        .load(std::sync::atomic::Ordering::Relaxed)
+        != 1
+    {
+        assert!(Instant::now() < deadline, "the gaze frame is counted");
+        thread::sleep(Duration::from_millis(2));
+    }
 
     // After a stream stop, no more gaze frames.
     assert_eq!(
@@ -364,10 +369,13 @@ fn live_head_pose_reaches_the_game_on_the_games_clock() {
             .load(std::sync::atomic::Ordering::Relaxed),
         1
     );
-    assert_eq!(
-        stats.poses_sent.load(std::sync::atomic::Ordering::Relaxed),
-        1
-    );
+    // The daemon counts a pose after writing it, so the message can be here
+    // a moment before the count is.
+    let deadline = Instant::now() + TIMEOUT;
+    while stats.poses_sent.load(std::sync::atomic::Ordering::Relaxed) != 1 {
+        assert!(Instant::now() < deadline, "the pose is counted");
+        thread::sleep(Duration::from_millis(2));
+    }
 }
 
 #[test]
@@ -757,6 +765,7 @@ fn a_second_daemon_on_the_same_control_socket_does_not_start() {
         settings_path: None,
         control_socket: rig.running.control_socket.clone(),
         monitor_index: None,
+        manage_overlay: false,
     });
     let err = second.expect_err("the socket is taken");
     assert!(

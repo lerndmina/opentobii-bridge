@@ -33,6 +33,10 @@ opentobii: a Tobii Eye Tracker 5 for games under Proton
 
   opentobii gui
       Open the tuning window: dead zone, smoothing, sensitivity, recentre.
+
+  opentobii overlay
+      Draw the gaze mark on screen. The daemon runs this by itself when the
+      overlay is switched on; there is no need to start it by hand.
 ";
 
 type CommandResult = Result<(), String>;
@@ -47,6 +51,8 @@ fn main() -> ExitCode {
         Some("status") => status(),
         #[cfg(feature = "gui")]
         Some("gui") => opentobii::gui::run(),
+        #[cfg(feature = "overlay")]
+        Some("overlay") => opentobii::overlay::run(),
         Some("help" | "--help" | "-h") => {
             print!("{USAGE}");
             Ok(())

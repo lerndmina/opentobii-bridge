@@ -3146,6 +3146,8 @@ dependencies = [
  "serde_json",
  "slint",
  "slint-build",
+ "smithay-client-toolkit",
+ "wayland-client",
 ]
 
 [[package]]

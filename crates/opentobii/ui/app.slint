@@ -298,6 +298,31 @@ component LookPad inherits Rectangle {
     }
 }
 
+component Swatch inherits Rectangle {
+    in property <color> fill;
+    in property <bool> selected;
+    in property <bool> enabled: true;
+    callback picked();
+    width: 28px;
+    height: 28px;
+    border-radius: 14px;
+    border-width: 2px;
+    border-color: root.selected ? Theme.text : transparent;
+    opacity: root.enabled ? 1 : 0.4;
+    Rectangle {
+        width: 20px;
+        height: 20px;
+        border-radius: 10px;
+        background: root.fill;
+    }
+    TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.picked();
+        }
+    }
+}
+
 component Legend inherits HorizontalLayout {
     in property <color> dot;
     in property <string> label;
@@ -367,12 +392,30 @@ export component App inherits Window {
     in-out property <bool> keep-display-setup;
     in property <bool> calibrating;
 
+    in property <bool> overlay-enabled;
+    in property <[string]> overlay-styles;
+    in-out property <int> overlay-style-index;
+    in property <[color]> overlay-colors;
+    in property <int> overlay-color-index;
+    in property <float> overlay-size;
+    in property <string> overlay-size-text;
+    in property <float> overlay-opacity;
+    in property <string> overlay-opacity-text;
+    in property <float> overlay-smoothing;
+    in property <string> overlay-smoothing-text;
+
     callback profile-selected(int);
     callback create-profile();
     callback delete-profile();
     callback reset-profile();
     callback recentre();
     callback calibrate();
+    callback overlay-toggled(bool);
+    callback overlay-style-selected(int);
+    callback overlay-color-selected(int);
+    callback overlay-size-changed(float);
+    callback overlay-opacity-changed(float);
+    callback overlay-smoothing-changed(float);
     callback smoothing-toggled(bool);
     callback steadiness-changed(float);
     callback response-changed(float);
@@ -647,6 +690,97 @@ export component App inherits Window {
                             }
                             invert(on) => {
                                 root.axis-invert("position", i, on);
+                            }
+                        }
+                    }
+
+                    Card {
+                        title: "Gaze overlay";
+                        hint: "A mark on screen where you are looking.";
+                        Switch {
+                            text: "Show where I am looking";
+                            checked: root.overlay-enabled;
+                            toggled => {
+                                root.overlay-toggled(self.checked);
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 12px;
+                            height: 32px;
+                            Text {
+                                text: "Style";
+                                color: root.overlay-enabled ? Theme.text : Theme.muted;
+                                font-size: 13px;
+                                vertical-alignment: center;
+                                width: 96px;
+                            }
+                            ComboBox {
+                                model: root.overlay-styles;
+                                current-index <=> root.overlay-style-index;
+                                enabled: root.overlay-enabled;
+                                horizontal-stretch: 1;
+                                selected => {
+                                    root.overlay-style-selected(self.current-index);
+                                }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 12px;
+                            height: 32px;
+                            Text {
+                                text: "Colour";
+                                color: root.overlay-enabled ? Theme.text : Theme.muted;
+                                font-size: 13px;
+                                vertical-alignment: center;
+                                width: 96px;
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: start;
+                                horizontal-stretch: 1;
+                                for fill[i] in root.overlay-colors: VerticalLayout {
+                                    alignment: center;
+                                    Swatch {
+                                        fill: fill;
+                                        selected: i == root.overlay-color-index;
+                                        enabled: root.overlay-enabled;
+                                        picked => {
+                                            root.overlay-color-selected(i);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Setting {
+                            label: "Size";
+                            minimum: 20;
+                            maximum: 600;
+                            value: root.overlay-size;
+                            value-text: root.overlay-size-text;
+                            enabled: root.overlay-enabled;
+                            changed(v) => {
+                                root.overlay-size-changed(v);
+                            }
+                        }
+                        Setting {
+                            label: "Opacity";
+                            minimum: 5;
+                            maximum: 100;
+                            value: root.overlay-opacity;
+                            value-text: root.overlay-opacity-text;
+                            enabled: root.overlay-enabled;
+                            changed(v) => {
+                                root.overlay-opacity-changed(v);
+                            }
+                        }
+                        Setting {
+                            label: "Smoothing";
+                            maximum: 100;
+                            value: root.overlay-smoothing;
+                            value-text: root.overlay-smoothing-text;
+                            enabled: root.overlay-enabled;
+                            changed(v) => {
+                                root.overlay-smoothing-changed(v);
                             }
                         }
                     }

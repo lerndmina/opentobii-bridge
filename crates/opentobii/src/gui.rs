@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use opentobii_core::config::Config;
 use opentobii_core::control::{self, Line, RawPose, Request, Status};
+use opentobii_core::overlay::{self, Overlay, Style};
 use opentobii_core::pipeline::{Axis, Neutral, Pipeline, Pose, Profile};
 use slint::{ComponentHandle, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
@@ -36,6 +37,11 @@ const VIEW_PITCH: f64 = 30.0;
 
 const ROTATION_NAMES: [&str; 3] = ["Pitch", "Yaw", "Roll"];
 const POSITION_NAMES: [&str; 3] = ["Side", "Up", "Depth"];
+/// The colours offered for the gaze mark.
+const OVERLAY_COLORS: [&str; 8] = [
+    "#60cdff", "#3ecfb2", "#7bd389", "#ffd166", "#ff8000", "#ef476f", "#b388ff", "#ffffff",
+];
+
 const DEFAULT_PROFILE_NAME: &str = "Default (every game)";
 
 /// What the background threads tell the window.
@@ -58,6 +64,7 @@ enum Command {
     Set(Option<String>, Box<Profile>),
     Delete(String),
     Recentre(Option<String>),
+    SetOverlay(Box<Overlay>),
 }
 
 // --- the driver's calibration tool -------------------------------------------
@@ -335,7 +342,10 @@ struct Ui {
     events: Sender<Event>,
     /// The newest unsent change, and when the last one went out.
     pending: Option<(Option<String>, Profile)>,
+    /// The newest unsent overlay settings.
+    pending_overlay: Option<Overlay>,
     last_sent: Instant,
+    last_overlay_sent: Instant,
     rotation: Rc<VecModel<AxisRow>>,
     position: Rc<VecModel<AxisRow>>,
 }
@@ -378,6 +388,49 @@ impl Ui {
                 self.last_sent = Instant::now();
             }
         }
+        if self.pending_overlay.is_some()
+            && (force || self.last_overlay_sent.elapsed() >= SEND_EVERY)
+        {
+            if let Some(overlay) = self.pending_overlay.take() {
+                let _ = self.commands.send(Command::SetOverlay(Box::new(overlay)));
+                self.last_overlay_sent = Instant::now();
+            }
+        }
+    }
+
+    /// Store edited overlay settings, show them, and queue them for the
+    /// daemon.
+    fn commit_overlay(&mut self, overlay: Overlay) {
+        if let Err(reason) = overlay.validate() {
+            self.failure = Some(reason);
+            self.refresh_chrome();
+            return;
+        }
+        self.config.overlay = overlay.clone();
+        self.pending_overlay = Some(overlay);
+        self.refresh_overlay();
+    }
+
+    /// The overlay card, from the settings.
+    fn refresh_overlay(&self) {
+        let app = &self.app;
+        let overlay = &self.config.overlay;
+        app.set_overlay_enabled(overlay.enabled);
+        let style = Style::ALL
+            .iter()
+            .position(|style| *style == overlay.style)
+            .unwrap_or(0);
+        app.set_overlay_style_index(i32::try_from(style).unwrap_or(0));
+        let color = OVERLAY_COLORS
+            .iter()
+            .position(|hex| hex.eq_ignore_ascii_case(&overlay.color));
+        app.set_overlay_color_index(color.and_then(|at| i32::try_from(at).ok()).unwrap_or(-1));
+        app.set_overlay_size(overlay.size as f32);
+        app.set_overlay_size_text(format!("{:.0} px", overlay.size).into());
+        app.set_overlay_opacity((overlay.opacity * 100.0) as f32);
+        app.set_overlay_opacity_text(format!("{:.0}%", overlay.opacity * 100.0).into());
+        app.set_overlay_smoothing(overlay.smoothing as f32);
+        app.set_overlay_smoothing_text(format!("{:.0}", overlay.smoothing).into());
     }
 
     fn select(&mut self, selected: Option<String>) {
@@ -389,6 +442,7 @@ impl Ui {
 
     fn refresh_all(&mut self) {
         self.refresh_chrome();
+        self.refresh_overlay();
         self.refresh_settings();
         self.refresh_live();
     }
@@ -723,6 +777,7 @@ fn send_commands(commands: Receiver<Command>, events: Sender<Event>) {
             ),
             Command::Delete(game) => (Request::DeleteProfile { game }, None),
             Command::Recentre(game) => (Request::Recentre { game: game.clone() }, Some(game)),
+            Command::SetOverlay(overlay) => (Request::SetOverlay { overlay: *overlay }, None),
         };
         let answer = UnixStream::connect(control::socket_path())
             .map_err(|err| format!("the daemon is not running: {err}"))
@@ -790,7 +845,9 @@ pub fn run() -> Result<(), String> {
         calibration_note: String::new(),
         events: event_tx.clone(),
         pending: None,
+        pending_overlay: None,
         last_sent: Instant::now(),
+        last_overlay_sent: Instant::now(),
         rotation,
         position,
     }));
@@ -906,6 +963,85 @@ pub fn run() -> Result<(), String> {
                     ui.select(None);
                 }
             }
+        }
+    });
+    app.set_overlay_styles(ModelRc::new(VecModel::from(
+        Style::ALL
+            .iter()
+            .map(|style| SharedString::from(style.label()))
+            .collect::<Vec<_>>(),
+    )));
+    app.set_overlay_colors(ModelRc::new(VecModel::from(
+        OVERLAY_COLORS
+            .iter()
+            .filter_map(|hex| overlay::parse_color(hex))
+            .map(|[r, g, b]| slint::Color::from_rgb_u8(r, g, b))
+            .collect::<Vec<_>>(),
+    )));
+    // Every overlay control edits a copy of the settings and commits it.
+    let edit_overlay = |ui: &Rc<RefCell<Ui>>, change: &dyn Fn(&mut Overlay)| {
+        if let Ok(mut ui) = ui.try_borrow_mut() {
+            let mut overlay = ui.config.overlay.clone();
+            change(&mut overlay);
+            ui.commit_overlay(overlay);
+        }
+    };
+    app.on_overlay_toggled({
+        let ui = Rc::clone(&ui);
+        move |on| {
+            edit_overlay(&ui, &|overlay| overlay.enabled = on);
+            // Switching it on or off should not wait for the next tick.
+            if let Ok(mut ui) = ui.try_borrow_mut() {
+                ui.flush(true);
+            }
+        }
+    });
+    app.on_overlay_style_selected({
+        let ui = Rc::clone(&ui);
+        move |index| {
+            let style = usize::try_from(index)
+                .ok()
+                .and_then(|at| Style::ALL.get(at).copied());
+            if let Some(style) = style {
+                edit_overlay(&ui, &|overlay| overlay.style = style);
+            }
+        }
+    });
+    app.on_overlay_color_selected({
+        let ui = Rc::clone(&ui);
+        move |index| {
+            let color = usize::try_from(index)
+                .ok()
+                .and_then(|at| OVERLAY_COLORS.get(at).copied());
+            if let Some(color) = color {
+                edit_overlay(&ui, &|overlay| overlay.color = color.to_owned());
+            }
+        }
+    });
+    app.on_overlay_size_changed({
+        let ui = Rc::clone(&ui);
+        move |value| {
+            edit_overlay(&ui, &|overlay| {
+                overlay.size = snap(f64::from(value), 10.0)
+                    .clamp(overlay::SIZE_RANGE.0, overlay::SIZE_RANGE.1);
+            });
+        }
+    });
+    app.on_overlay_opacity_changed({
+        let ui = Rc::clone(&ui);
+        move |value| {
+            edit_overlay(&ui, &|overlay| {
+                let opacity = snap(f64::from(value), 5.0) / 100.0;
+                overlay.opacity = opacity.clamp(overlay::OPACITY_RANGE.0, overlay::OPACITY_RANGE.1);
+            });
+        }
+    });
+    app.on_overlay_smoothing_changed({
+        let ui = Rc::clone(&ui);
+        move |value| {
+            edit_overlay(&ui, &|overlay| {
+                overlay.smoothing = snap(f64::from(value), 5.0).clamp(0.0, 100.0)
+            });
         }
     });
     app.on_calibrate({

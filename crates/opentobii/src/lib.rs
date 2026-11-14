@@ -10,6 +10,8 @@
 pub mod daemon;
 #[cfg(feature = "gui")]
 pub mod gui;
+#[cfg(feature = "overlay")]
+pub mod overlay;
 pub mod prefix;
 mod recorded;
 pub mod steam;
