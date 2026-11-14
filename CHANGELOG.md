@@ -2,7 +2,7 @@
 
 The release workflow publishes the section for the version being released as that release's notes, and the tuning window shows its first lines in the update banner.
 
-## Unreleased
+## 0.2.3
 
 - Face login camera: the daemon can publish the tracker's infrared picture on a v4l2loopback device, for Howdy. It feeds pictures only while a program reads the device.
 
