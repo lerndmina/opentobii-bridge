@@ -45,6 +45,16 @@ opentobii status             # what the running daemon is connected to
 
 To start the daemon at login, copy the binary to `~/.local/bin/` and `packaging/opentobii.service` to `~/.config/systemd/user/`, then `systemctl --user enable --now opentobii`.
 
+### The tuning window
+
+```sh
+opentobii gui
+```
+
+![The opentobii tuning window](docs/gui.png)
+
+Shows what the tracker sees against what is sent to the game, and edits the selected profile live: smoothing, and per axis a dead zone, sensitivity, curve, limit and invert. "Recentre" makes your current head pose the neutral one. It talks to the running daemon, so start that first. Building it needs `fontconfig-devel`; `cargo build --no-default-features` builds the daemon and commands without the window.
+
 ### Settings
 
 Tuning lives in `~/.config/opentobii/config.toml` (or `--config PATH`): one `[default]` profile and one per game under `[games."name.exe"]`. Each axis (`pitch`, `yaw`, `roll`, `x`, `y`, `z`) has `dead_zone`, `sensitivity`, `curve`, `invert` and `limit`; `[default.smoothing]` holds the filter settings. A file with a mistake in it stops the daemon from starting and says what is wrong.

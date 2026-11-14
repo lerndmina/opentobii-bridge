@@ -1,0 +1,899 @@
+//! The tuning window: `opentobii gui`.
+//!
+//! The window is a client of the daemon's control socket. One thread
+//! follows the daemon's feed of head poses and status, another sends the
+//! changes made in the window. The window keeps its own copy of the
+//! settings and runs its own pipeline on the raw poses, so what it draws as
+//! "sent to the game" is the profile being edited, whether or not that game
+//! is running.
+
+use std::cell::RefCell;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
+use std::rc::Rc;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use opentobii_core::config::Config;
+use opentobii_core::control::{self, Line, RawPose, Request, Status};
+use opentobii_core::pipeline::{Axis, Neutral, Pipeline, Pose, Profile};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
+
+slint::include_modules!();
+
+const RETRY_EVERY: Duration = Duration::from_secs(2);
+const READ_TIMEOUT: Duration = Duration::from_secs(3);
+/// No pose for this long and the live view goes dark.
+const POSE_TIMEOUT: Duration = Duration::from_millis(600);
+/// Changes are sent at most this often while a slider is dragged.
+const SEND_EVERY: Duration = Duration::from_millis(80);
+
+/// Half the width of the live view, degrees of yaw; and half its height,
+/// degrees of pitch.
+const VIEW_YAW: f64 = 45.0;
+const VIEW_PITCH: f64 = 30.0;
+
+const ROTATION_NAMES: [&str; 3] = ["Pitch", "Yaw", "Roll"];
+const POSITION_NAMES: [&str; 3] = ["Side", "Up", "Depth"];
+const DEFAULT_PROFILE_NAME: &str = "Default (every game)";
+
+/// What the background threads tell the window.
+enum Event {
+    Connected(Box<Config>, Status),
+    Disconnected,
+    Pose(RawPose),
+    Status(Status),
+    Recentred(Option<String>, Neutral),
+    Failed(String),
+}
+
+/// What the window asks the daemon to do.
+enum Command {
+    Set(Option<String>, Box<Profile>),
+    Delete(String),
+    Recentre(Option<String>),
+}
+
+// --- pure helpers, tested without a window ---------------------------------
+
+/// Steadiness slider (0 to 100) to the filter's cutoff at rest, Hz: 3 Hz at
+/// 0, 0.1 Hz at 100, evenly spaced by ratio.
+fn cutoff_for(steadiness: f64) -> f64 {
+    3.0 * (0.1f64 / 3.0).powf(steadiness.clamp(0.0, 100.0) / 100.0)
+}
+
+fn steadiness_for(cutoff: f64) -> f64 {
+    ((cutoff.clamp(0.1, 3.0) / 3.0).ln() / (0.1f64 / 3.0).ln() * 100.0).clamp(0.0, 100.0)
+}
+
+/// "Fast turns" slider (0 to 100) to the rotation filter's response.
+fn response_for(slider: f64) -> f64 {
+    slider.clamp(0.0, 100.0) / 100.0 * 0.5
+}
+
+fn slider_for_response(response: f64) -> f64 {
+    (response / 0.5 * 100.0).clamp(0.0, 100.0)
+}
+
+fn snap(value: f64, step: f64) -> f64 {
+    (value / step).round() * step
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Group {
+    Rotation,
+    Position,
+}
+
+impl Group {
+    fn parse(name: &str) -> Option<Self> {
+        match name {
+            "rotation" => Some(Self::Rotation),
+            "position" => Some(Self::Position),
+            _ => None,
+        }
+    }
+
+    fn unit(self) -> &'static str {
+        match self {
+            Self::Rotation => "°",
+            Self::Position => " mm",
+        }
+    }
+
+    fn dead_zone_max(self) -> f64 {
+        match self {
+            Self::Rotation => 10.0,
+            Self::Position => 50.0,
+        }
+    }
+
+    fn limit_max(self) -> f64 {
+        match self {
+            Self::Rotation => 180.0,
+            Self::Position => 500.0,
+        }
+    }
+}
+
+fn axis_mut(profile: &mut Profile, group: Group, index: usize) -> Option<&mut Axis> {
+    match (group, index) {
+        (Group::Rotation, 0) => Some(&mut profile.pitch),
+        (Group::Rotation, 1) => Some(&mut profile.yaw),
+        (Group::Rotation, 2) => Some(&mut profile.roll),
+        (Group::Position, 0) => Some(&mut profile.x),
+        (Group::Position, 1) => Some(&mut profile.y),
+        (Group::Position, 2) => Some(&mut profile.z),
+        _ => None,
+    }
+}
+
+fn axes(profile: &Profile, group: Group) -> [Axis; 3] {
+    match group {
+        Group::Rotation => [profile.pitch, profile.yaw, profile.roll],
+        Group::Position => [profile.x, profile.y, profile.z],
+    }
+}
+
+/// Put a slider's value into one field of an axis, snapped to a sensible
+/// step. Returns false for a field this window does not know.
+fn set_field(axis: &mut Axis, group: Group, field: &str, value: f64) -> bool {
+    let fine = if group == Group::Rotation { 0.1 } else { 1.0 };
+    match field {
+        "dead_zone" => axis.dead_zone = snap(value, fine).clamp(0.0, group.dead_zone_max()),
+        "sensitivity" => axis.sensitivity = snap(value, 0.05).clamp(0.0, 5.0),
+        "curve" => axis.curve = snap(value, 0.05).clamp(0.5, 3.0),
+        "limit" => {
+            let limit = snap(value, 1.0).clamp(0.0, group.limit_max());
+            // The bottom of the slider is "no limit".
+            axis.limit = if limit < 1.0 { 0.0 } else { limit };
+        }
+        _ => return false,
+    }
+    true
+}
+
+fn amount(value: f64, group: Group) -> String {
+    match group {
+        Group::Rotation => format!("{value:.1}°"),
+        Group::Position => format!("{value:.0} mm"),
+    }
+}
+
+fn signed(value: f64, group: Group) -> String {
+    match group {
+        Group::Rotation => format!("{value:+.1}°"),
+        Group::Position => format!("{value:+.0} mm"),
+    }
+}
+
+fn row(name: &str, axis: &Axis, group: Group, raw: Option<f64>, out: Option<f64>) -> AxisRow {
+    let reading = |value: Option<f64>| value.map_or_else(|| "–".to_owned(), |v| signed(v, group));
+    AxisRow {
+        name: name.into(),
+        dead_zone: axis.dead_zone as f32,
+        dead_zone_max: group.dead_zone_max() as f32,
+        dead_zone_text: amount(axis.dead_zone, group).into(),
+        sensitivity: axis.sensitivity as f32,
+        sensitivity_text: format!("{:.2}×", axis.sensitivity).into(),
+        curve: axis.curve as f32,
+        curve_text: format!("{:.2}", axis.curve).into(),
+        limit: axis.limit as f32,
+        limit_max: group.limit_max() as f32,
+        limit_text: if axis.limit > 0.0 {
+            format!("{:.0}{}", axis.limit, group.unit()).into()
+        } else {
+            "Off".into()
+        },
+        invert: axis.invert,
+        raw_text: reading(raw).into(),
+        out_text: reading(out).into(),
+    }
+}
+
+/// The name a profile goes by in the list.
+fn profile_names(config: &Config) -> Vec<String> {
+    std::iter::once(DEFAULT_PROFILE_NAME.to_owned())
+        .chain(config.games.keys().cloned())
+        .collect()
+}
+
+/// A connected game that has no profile of its own yet.
+fn game_without_profile(config: &Config, status: &Status) -> Option<String> {
+    status
+        .games
+        .iter()
+        .map(|game| game.game.clone())
+        .find(|key| !key.is_empty() && !config.games.contains_key(key))
+}
+
+// --- the window's state -----------------------------------------------------
+
+struct Ui {
+    app: App,
+    commands: Sender<Command>,
+    config: Config,
+    /// The game whose profile is shown; `None` is the default profile.
+    selected: Option<String>,
+    status: Status,
+    connected: bool,
+    pipeline: Pipeline,
+    last_pose: Option<(Instant, RawPose, Pose)>,
+    failure: Option<String>,
+    /// The newest unsent change, and when the last one went out.
+    pending: Option<(Option<String>, Profile)>,
+    last_sent: Instant,
+    rotation: Rc<VecModel<AxisRow>>,
+    position: Rc<VecModel<AxisRow>>,
+}
+
+impl Ui {
+    fn profile(&self) -> Profile {
+        match &self.selected {
+            Some(game) => self
+                .config
+                .games
+                .get(game)
+                .copied()
+                .unwrap_or(self.config.default),
+            None => self.config.default,
+        }
+    }
+
+    /// Store an edited profile, show it, and queue it for the daemon.
+    fn commit(&mut self, profile: Profile) {
+        if let Err(reason) = profile.validate() {
+            self.failure = Some(reason);
+            self.refresh_chrome();
+            return;
+        }
+        match &self.selected {
+            Some(game) => {
+                self.config.games.insert(game.clone(), profile);
+            }
+            None => self.config.default = profile,
+        }
+        let _ = self.pipeline.set_profile(profile);
+        self.pending = Some((self.selected.clone(), profile));
+        self.refresh_settings();
+    }
+
+    fn flush(&mut self, force: bool) {
+        if self.pending.is_some() && (force || self.last_sent.elapsed() >= SEND_EVERY) {
+            if let Some((game, profile)) = self.pending.take() {
+                let _ = self.commands.send(Command::Set(game, Box::new(profile)));
+                self.last_sent = Instant::now();
+            }
+        }
+    }
+
+    fn select(&mut self, selected: Option<String>) {
+        self.flush(true);
+        self.selected = selected.filter(|game| self.config.games.contains_key(game));
+        let _ = self.pipeline.set_profile(self.profile());
+        self.refresh_all();
+    }
+
+    fn refresh_all(&mut self) {
+        self.refresh_chrome();
+        self.refresh_settings();
+        self.refresh_live();
+    }
+
+    /// Status pills, the notice line and the profile list.
+    fn refresh_chrome(&self) {
+        let app = &self.app;
+        app.set_daemon_connected(self.connected);
+        app.set_driver_connected(self.status.driver_connected);
+        let tracker = if !self.connected {
+            "Unknown"
+        } else if !self.status.driver_connected {
+            "Driver not running"
+        } else if self.status.tracking {
+            "Tracking"
+        } else if self.status.presence == 1 {
+            "Nobody in view"
+        } else {
+            "Idle"
+        };
+        app.set_tracker_text(tracker.into());
+        let game_text = match self.status.games.as_slice() {
+            [] => "None connected".to_owned(),
+            [game] if game.game.is_empty() => "Connected".to_owned(),
+            [game] => game.game.clone(),
+            many => format!("{} connected", many.len()),
+        };
+        app.set_game_text(game_text.into());
+        app.set_game_connected(!self.status.games.is_empty());
+
+        let notice = if !self.connected {
+            "The opentobii daemon is not running. Start it with: opentobii daemon".to_owned()
+        } else {
+            self.failure.clone().unwrap_or_default()
+        };
+        app.set_notice(notice.into());
+
+        let names: Vec<SharedString> = profile_names(&self.config)
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        let index = self
+            .selected
+            .as_ref()
+            .and_then(|game| self.config.games.keys().position(|key| key == game))
+            .map_or(0, |at| at + 1);
+        app.set_profiles(ModelRc::new(VecModel::from(names)));
+        app.set_profile_index(i32::try_from(index).unwrap_or(0));
+        app.set_can_delete(self.selected.is_some());
+        let creatable = game_without_profile(&self.config, &self.status);
+        app.set_can_create(creatable.is_some());
+        app.set_create_text(
+            creatable
+                .map(|game| format!("Create a profile for {game}"))
+                .unwrap_or_default()
+                .into(),
+        );
+    }
+
+    /// Sliders and switches, from the selected profile.
+    fn refresh_settings(&self) {
+        let profile = self.profile();
+        let app = &self.app;
+        app.set_smoothing_enabled(profile.smoothing.enabled);
+        app.set_steadiness(steadiness_for(profile.smoothing.rotation_steadiness) as f32);
+        app.set_steadiness_text(format!("{:.2} Hz", profile.smoothing.rotation_steadiness).into());
+        app.set_response(slider_for_response(profile.smoothing.rotation_response) as f32);
+        app.set_response_text(format!("{:.2}", profile.smoothing.rotation_response).into());
+        app.set_look_dead_x((profile.yaw.dead_zone / VIEW_YAW) as f32);
+        app.set_look_dead_y((profile.pitch.dead_zone / VIEW_PITCH) as f32);
+        app.set_look_range_text(
+            format!("±{VIEW_YAW:.0}° across, ±{VIEW_PITCH:.0}° up and down").into(),
+        );
+        self.refresh_rows();
+    }
+
+    fn refresh_rows(&self) {
+        let profile = self.profile();
+        let live = self
+            .last_pose
+            .as_ref()
+            .filter(|(at, _, _)| at.elapsed() < POSE_TIMEOUT);
+        for (group, names, model) in [
+            (Group::Rotation, ROTATION_NAMES, &self.rotation),
+            (Group::Position, POSITION_NAMES, &self.position),
+        ] {
+            for (index, (name, axis)) in names.iter().zip(axes(&profile, group)).enumerate() {
+                let (raw, out) = match (live, group) {
+                    (Some((_, raw, out)), Group::Rotation) => (
+                        Some(f64::from(raw.rotation_deg[index]) - profile.neutral.rotation[index]),
+                        Some(f64::from(out.rotation_rad[index]).to_degrees()),
+                    ),
+                    (Some((_, raw, out)), Group::Position) => {
+                        let centre = profile.neutral.position.map_or(0.0, |centre| centre[index]);
+                        (
+                            Some(f64::from(raw.position_mm[index]) - centre),
+                            Some(f64::from(out.position_mm[index]) - centre),
+                        )
+                    }
+                    (None, _) => (None, None),
+                };
+                let fresh = row(name, &axis, group, raw, out);
+                if model.row_data(index).as_ref() != Some(&fresh) {
+                    model.set_row_data(index, fresh);
+                }
+            }
+        }
+    }
+
+    /// The live view, from the newest pose.
+    fn refresh_live(&self) {
+        let app = &self.app;
+        let live = self
+            .last_pose
+            .as_ref()
+            .filter(|(at, _, _)| at.elapsed() < POSE_TIMEOUT);
+        app.set_tracking(live.is_some());
+        if let Some((_, raw, out)) = live {
+            let neutral = self.profile().neutral.rotation;
+            let unit = |value: f64, range: f64| (value / range).clamp(-1.0, 1.0) as f32;
+            // Positive yaw is a turn to the user's left; positive pitch lifts
+            // the chin; positive roll tilts towards the left shoulder.
+            app.set_look_raw_x(unit(
+                -(f64::from(raw.rotation_deg[1]) - neutral[1]),
+                VIEW_YAW,
+            ));
+            app.set_look_raw_y(unit(
+                f64::from(raw.rotation_deg[0]) - neutral[0],
+                VIEW_PITCH,
+            ));
+            app.set_look_out_x(unit(-f64::from(out.rotation_rad[1]).to_degrees(), VIEW_YAW));
+            app.set_look_out_y(unit(
+                f64::from(out.rotation_rad[0]).to_degrees(),
+                VIEW_PITCH,
+            ));
+            app.set_look_roll(-out.rotation_rad[2].to_degrees());
+        }
+        self.refresh_rows();
+    }
+
+    fn on_event(&mut self, event: Event) {
+        match event {
+            Event::Connected(config, status) => {
+                self.config = *config;
+                self.status = status;
+                self.connected = true;
+                self.failure = None;
+                let selected = self.selected.take();
+                self.select(selected);
+            }
+            Event::Disconnected => {
+                self.connected = false;
+                self.status = Status::default();
+                self.last_pose = None;
+                self.refresh_all();
+            }
+            Event::Status(status) => {
+                self.status = status;
+                self.refresh_chrome();
+            }
+            Event::Pose(raw) => {
+                if raw.valid {
+                    let input = Pose {
+                        position_mm: raw.position_mm,
+                        rotation_rad: raw.rotation_deg.map(f32::to_radians),
+                    };
+                    let out = self.pipeline.process(raw.micros, input);
+                    self.last_pose = Some((Instant::now(), raw, out));
+                }
+            }
+            Event::Recentred(game, neutral) => {
+                match &game {
+                    Some(key) => {
+                        if let Some(profile) = self.config.games.get_mut(key) {
+                            profile.neutral = neutral;
+                        }
+                    }
+                    None => self.config.default.neutral = neutral,
+                }
+                self.failure = None;
+                let _ = self.pipeline.set_profile(self.profile());
+                self.refresh_all();
+            }
+            Event::Failed(reason) => {
+                self.failure = Some(reason);
+                self.refresh_chrome();
+            }
+        }
+    }
+}
+
+// --- talking to the daemon ---------------------------------------------------
+
+fn ask(
+    stream: &mut UnixStream,
+    reader: &mut impl BufRead,
+    request: &Request,
+) -> Result<Line, String> {
+    let text = serde_json::to_string(request).map_err(|err| err.to_string())?;
+    writeln!(stream, "{text}").map_err(|err| err.to_string())?;
+    let mut answer = String::new();
+    match reader.read_line(&mut answer) {
+        Ok(0) => Err("the daemon closed the connection".into()),
+        Ok(_) => serde_json::from_str(&answer).map_err(|err| format!("unexpected answer: {err}")),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+/// Follow the daemon: its settings on connect, then poses and status.
+fn follow(events: Sender<Event>) {
+    loop {
+        if let Ok(mut stream) = UnixStream::connect(control::socket_path()) {
+            let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
+            if let Ok(clone) = stream.try_clone() {
+                let mut reader = BufReader::new(clone);
+                if let Ok(Line::State { config, status }) =
+                    ask(&mut stream, &mut reader, &Request::Get)
+                {
+                    let _ = events.send(Event::Connected(Box::new(config), status));
+                    if ask(&mut stream, &mut reader, &Request::Subscribe).is_ok() {
+                        let mut text = String::new();
+                        loop {
+                            text.clear();
+                            match reader.read_line(&mut text) {
+                                Ok(n) if n > 0 => {}
+                                // The status line comes every second, so a
+                                // timeout means the daemon is gone or stuck.
+                                _ => break,
+                            }
+                            let sent = match serde_json::from_str::<Line>(&text) {
+                                Ok(Line::Pose(pose)) => events.send(Event::Pose(pose)),
+                                Ok(Line::Status(status)) => events.send(Event::Status(status)),
+                                _ => Ok(()),
+                            };
+                            if sent.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if events.send(Event::Disconnected).is_err() {
+            return;
+        }
+        thread::sleep(RETRY_EVERY);
+    }
+}
+
+/// Carry out the window's commands, one connection each.
+fn send_commands(commands: Receiver<Command>, events: Sender<Event>) {
+    for command in commands {
+        let (request, recentre) = match command {
+            Command::Set(game, profile) => (
+                Request::SetProfile {
+                    game,
+                    profile: *profile,
+                },
+                None,
+            ),
+            Command::Delete(game) => (Request::DeleteProfile { game }, None),
+            Command::Recentre(game) => (Request::Recentre { game: game.clone() }, Some(game)),
+        };
+        let answer = UnixStream::connect(control::socket_path())
+            .map_err(|err| format!("the daemon is not running: {err}"))
+            .and_then(|mut stream| {
+                let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
+                let clone = stream.try_clone().map_err(|err| err.to_string())?;
+                ask(&mut stream, &mut BufReader::new(clone), &request)
+            });
+        let event = match (answer, recentre) {
+            (Ok(Line::Recentred { neutral }), Some(game)) => Some(Event::Recentred(game, neutral)),
+            (Ok(Line::Error { reason }), _) | (Err(reason), _) => Some(Event::Failed(reason)),
+            (Ok(_), _) => None,
+        };
+        if let Some(event) = event {
+            if events.send(event).is_err() {
+                return;
+            }
+        }
+    }
+}
+
+/// Open the tuning window and run until it is closed.
+pub fn run() -> Result<(), String> {
+    let app = App::new().map_err(|err| format!("cannot open a window: {err}"))?;
+    let (event_tx, event_rx) = mpsc::channel();
+    let (command_tx, command_rx) = mpsc::channel();
+    thread::spawn({
+        let events = event_tx.clone();
+        move || follow(events)
+    });
+    thread::spawn(move || send_commands(command_rx, event_tx));
+
+    let blank = |names: [&str; 3], group| {
+        let rows: Vec<AxisRow> = names
+            .iter()
+            .map(|name| row(name, &Axis::default(), group, None, None))
+            .collect();
+        Rc::new(VecModel::from(rows))
+    };
+    let rotation = blank(ROTATION_NAMES, Group::Rotation);
+    let position = blank(POSITION_NAMES, Group::Position);
+    app.set_rotation(ModelRc::from(Rc::clone(&rotation)));
+    app.set_position(ModelRc::from(Rc::clone(&position)));
+
+    let ui = Rc::new(RefCell::new(Ui {
+        app: app.clone_strong(),
+        commands: command_tx,
+        config: Config::default(),
+        selected: None,
+        status: Status::default(),
+        connected: false,
+        pipeline: Pipeline::new(Profile::default())?,
+        last_pose: None,
+        failure: None,
+        pending: None,
+        last_sent: Instant::now(),
+        rotation,
+        position,
+    }));
+    ui.borrow_mut().refresh_all();
+
+    // Every callback edits a copy of the selected profile and commits it.
+    let edit = |ui: &Rc<RefCell<Ui>>, change: &dyn Fn(&mut Profile)| {
+        if let Ok(mut ui) = ui.try_borrow_mut() {
+            let mut profile = ui.profile();
+            change(&mut profile);
+            ui.commit(profile);
+        }
+    };
+
+    app.on_axis_changed({
+        let ui = Rc::clone(&ui);
+        move |group, index, field, value| {
+            let (Some(group), Ok(index)) = (Group::parse(&group), usize::try_from(index)) else {
+                return;
+            };
+            edit(&ui, &|profile| {
+                if let Some(axis) = axis_mut(profile, group, index) {
+                    set_field(axis, group, &field, f64::from(value));
+                }
+            });
+        }
+    });
+    app.on_axis_invert({
+        let ui = Rc::clone(&ui);
+        move |group, index, on| {
+            let (Some(group), Ok(index)) = (Group::parse(&group), usize::try_from(index)) else {
+                return;
+            };
+            edit(&ui, &|profile| {
+                if let Some(axis) = axis_mut(profile, group, index) {
+                    axis.invert = on;
+                }
+            });
+        }
+    });
+    app.on_smoothing_toggled({
+        let ui = Rc::clone(&ui);
+        move |on| edit(&ui, &|profile| profile.smoothing.enabled = on)
+    });
+    app.on_steadiness_changed({
+        let ui = Rc::clone(&ui);
+        move |value| {
+            edit(&ui, &|profile| {
+                let cutoff = snap(cutoff_for(f64::from(value)), 0.01).max(0.1);
+                profile.smoothing.rotation_steadiness = cutoff;
+                profile.smoothing.position_steadiness = cutoff;
+            });
+        }
+    });
+    app.on_response_changed({
+        let ui = Rc::clone(&ui);
+        move |value| {
+            edit(&ui, &|profile| {
+                let response = snap(response_for(f64::from(value)), 0.01);
+                profile.smoothing.rotation_response = response;
+                // Position moves in bigger numbers, so it opens more slowly;
+                // the ratio is the one tuned by hand in ETS2.
+                profile.smoothing.position_response = response / 5.0;
+            });
+        }
+    });
+    app.on_reset_profile({
+        let ui = Rc::clone(&ui);
+        move || {
+            edit(&ui, &|profile| {
+                // Keep where straight ahead is: that is not a tuning value.
+                *profile = Profile {
+                    neutral: profile.neutral,
+                    ..Profile::default()
+                };
+            });
+        }
+    });
+    app.on_profile_selected({
+        let ui = Rc::clone(&ui);
+        move |index| {
+            if let Ok(mut ui) = ui.try_borrow_mut() {
+                let game = usize::try_from(index)
+                    .ok()
+                    .and_then(|index| index.checked_sub(1))
+                    .and_then(|at| ui.config.games.keys().nth(at).cloned());
+                ui.select(game);
+            }
+        }
+    });
+    app.on_create_profile({
+        let ui = Rc::clone(&ui);
+        move || {
+            if let Ok(mut ui) = ui.try_borrow_mut() {
+                if let Some(game) = game_without_profile(&ui.config, &ui.status) {
+                    let start = ui.config.default;
+                    ui.config.games.insert(game.clone(), start);
+                    ui.select(Some(game));
+                    ui.commit(start);
+                    ui.flush(true);
+                }
+            }
+        }
+    });
+    app.on_delete_profile({
+        let ui = Rc::clone(&ui);
+        move || {
+            if let Ok(mut ui) = ui.try_borrow_mut() {
+                if let Some(game) = ui.selected.clone() {
+                    ui.pending = None;
+                    ui.config.games.remove(&game);
+                    let _ = ui.commands.send(Command::Delete(game));
+                    ui.select(None);
+                }
+            }
+        }
+    });
+    app.on_recentre({
+        let ui = Rc::clone(&ui);
+        move || {
+            if let Ok(mut ui) = ui.try_borrow_mut() {
+                ui.flush(true);
+                let _ = ui.commands.send(Command::Recentre(ui.selected.clone()));
+            }
+        }
+    });
+
+    // The window's heartbeat: take in what the threads sent, redraw the
+    // live view, and send any change a slider left waiting.
+    let timer = Timer::default();
+    timer.start(TimerMode::Repeated, Duration::from_millis(16), {
+        let ui = Rc::clone(&ui);
+        move || {
+            if let Ok(mut ui) = ui.try_borrow_mut() {
+                let mut poses = false;
+                while let Ok(event) = event_rx.try_recv() {
+                    poses |= matches!(event, Event::Pose(_));
+                    ui.on_event(event);
+                }
+                let stale = ui.app.get_tracking()
+                    && ui
+                        .last_pose
+                        .as_ref()
+                        .is_none_or(|(at, _, _)| at.elapsed() >= POSE_TIMEOUT);
+                if poses || stale {
+                    ui.refresh_live();
+                }
+                ui.flush(false);
+            }
+        }
+    });
+
+    // For screenshots in reviews and docs: with OPENTOBII_GUI_SNAPSHOT set to
+    // a path, save the window there as a PPM image after a moment and quit.
+    let snapshot = Timer::default();
+    if let Some(path) = std::env::var_os("OPENTOBII_GUI_SNAPSHOT") {
+        let app = app.clone_strong();
+        snapshot.start(
+            TimerMode::SingleShot,
+            Duration::from_millis(3000),
+            move || {
+                match app.window().take_snapshot() {
+                    Ok(pixels) => {
+                        let mut image =
+                            format!("P6\n{} {}\n255\n", pixels.width(), pixels.height())
+                                .into_bytes();
+                        for pixel in pixels.as_slice() {
+                            image.extend_from_slice(&[pixel.r, pixel.g, pixel.b]);
+                        }
+                        if let Err(err) = std::fs::write(&path, image) {
+                            eprintln!("opentobii: cannot save the snapshot: {err}");
+                        }
+                    }
+                    Err(err) => eprintln!("opentobii: cannot take a snapshot: {err}"),
+                }
+                let _ = slint::quit_event_loop();
+            },
+        );
+    }
+
+    let result = app.run().map_err(|err| format!("the window failed: {err}"));
+    if let Ok(mut ui) = ui.try_borrow_mut() {
+        ui.flush(true);
+    }
+    // Give the last change a moment to reach the daemon before the process
+    // ends and takes the sending thread with it.
+    thread::sleep(Duration::from_millis(150));
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use opentobii_core::control::GameStatus;
+
+    #[test]
+    fn steadiness_slider_covers_three_hertz_down_to_a_tenth() {
+        assert!((cutoff_for(0.0) - 3.0).abs() < 1e-9);
+        assert!((cutoff_for(100.0) - 0.1).abs() < 1e-9);
+        assert!(cutoff_for(50.0) < 1.0 && cutoff_for(50.0) > 0.3);
+        for cutoff in [0.1, 0.4, 0.8, 1.5, 3.0] {
+            assert!(
+                (cutoff_for(steadiness_for(cutoff)) - cutoff).abs() < 1e-9,
+                "{cutoff}"
+            );
+        }
+        assert_eq!(steadiness_for(50.0), 0.0, "out of range clamps");
+    }
+
+    #[test]
+    fn response_slider_round_trips() {
+        assert_eq!(response_for(0.0), 0.0);
+        assert!((response_for(100.0) - 0.5).abs() < 1e-12);
+        assert!((slider_for_response(response_for(20.0)) - 20.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn slider_values_are_snapped_and_clamped() {
+        let mut axis = Axis::default();
+        assert!(set_field(&mut axis, Group::Rotation, "dead_zone", 2.34));
+        assert!((axis.dead_zone - 2.3).abs() < 1e-9);
+        assert!(set_field(&mut axis, Group::Rotation, "dead_zone", 99.0));
+        assert_eq!(axis.dead_zone, 10.0);
+        assert!(set_field(&mut axis, Group::Rotation, "sensitivity", 1.52));
+        assert!((axis.sensitivity - 1.5).abs() < 1e-9);
+        assert!(set_field(&mut axis, Group::Rotation, "curve", 0.1));
+        assert_eq!(axis.curve, 0.5);
+        assert!(set_field(&mut axis, Group::Position, "limit", 0.4));
+        assert_eq!(axis.limit, 0.0, "the bottom of the slider is no limit");
+        assert!(set_field(&mut axis, Group::Position, "limit", 120.4));
+        assert_eq!(axis.limit, 120.0);
+        assert!(!set_field(&mut axis, Group::Rotation, "colour", 1.0));
+        let profile = Profile {
+            yaw: axis,
+            ..Profile::default()
+        };
+        assert!(
+            profile.validate().is_ok(),
+            "whatever the sliders produce is a usable profile"
+        );
+    }
+
+    #[test]
+    fn rows_show_values_in_the_groups_units() {
+        let axis = Axis {
+            dead_zone: 1.5,
+            sensitivity: 2.0,
+            curve: 1.25,
+            invert: true,
+            limit: 0.0,
+        };
+        let turning = row("Yaw", &axis, Group::Rotation, Some(-3.25), Some(-3.5));
+        assert_eq!(turning.dead_zone_text, "1.5°");
+        assert_eq!(turning.sensitivity_text, "2.00×");
+        assert_eq!(turning.limit_text, "Off");
+        assert_eq!(
+            (turning.raw_text.as_str(), turning.out_text.as_str()),
+            ("-3.2°", "-3.5°")
+        );
+        let leaning = row(
+            "Side",
+            &Axis {
+                limit: 200.0,
+                ..axis
+            },
+            Group::Position,
+            None,
+            None,
+        );
+        assert_eq!(leaning.dead_zone_text, "2 mm");
+        assert_eq!(leaning.limit_text, "200 mm");
+        assert_eq!(leaning.raw_text, "–");
+    }
+
+    #[test]
+    fn offers_a_profile_for_a_connected_game_that_has_none() {
+        let mut config = Config::default();
+        let game = |key: &str| GameStatus {
+            pid: 1,
+            executable: key.into(),
+            game: key.into(),
+            own_profile: false,
+            head_pose: true,
+        };
+        let status = Status {
+            games: vec![game(""), game("eurotrucks2.exe")],
+            ..Status::default()
+        };
+        assert_eq!(
+            game_without_profile(&config, &status).as_deref(),
+            Some("eurotrucks2.exe")
+        );
+        config
+            .games
+            .insert("eurotrucks2.exe".into(), Profile::default());
+        assert_eq!(game_without_profile(&config, &status), None);
+        assert_eq!(
+            profile_names(&config),
+            [DEFAULT_PROFILE_NAME, "eurotrucks2.exe"]
+        );
+    }
+}

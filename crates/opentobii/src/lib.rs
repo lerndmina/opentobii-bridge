@@ -8,6 +8,8 @@
 //!   the services pipe that carries the display id and head pose (47455).
 
 pub mod daemon;
+#[cfg(feature = "gui")]
+pub mod gui;
 pub mod prefix;
 mod recorded;
 pub mod steam;

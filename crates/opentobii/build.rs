@@ -11,6 +11,11 @@ use std::process::Command;
 const COMPILER: &str = "x86_64-w64-mingw32-gcc";
 
 fn main() {
+    #[cfg(feature = "gui")]
+    {
+        let config = slint_build::CompilerConfiguration::new().with_style("fluent-dark".into());
+        slint_build::compile_with_config("ui/app.slint", config).expect("ui/app.slint compiles");
+    }
     let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../helper/sesp_relay.c");
     let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"))
         .join("sesp_relay.exe");

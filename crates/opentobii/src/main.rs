@@ -30,6 +30,9 @@ opentobii: a Tobii Eye Tracker 5 for games under Proton
 
   opentobii status
       Show what the running daemon is connected to.
+
+  opentobii gui
+      Open the tuning window: dead zone, smoothing, sensitivity, recentre.
 ";
 
 type CommandResult = Result<(), String>;
@@ -42,6 +45,8 @@ fn main() -> ExitCode {
         Some("install") => install(args),
         Some("uninstall") => uninstall(args),
         Some("status") => status(),
+        #[cfg(feature = "gui")]
+        Some("gui") => opentobii::gui::run(),
         Some("help" | "--help" | "-h") => {
             print!("{USAGE}");
             Ok(())

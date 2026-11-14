@@ -1,0 +1,616 @@
+// The opentobii tuning window. All numbers are formatted in Rust and all
+// state lives there; this file is layout and looks.
+
+import { AboutSlint, Button, ComboBox, ScrollView, Slider, Switch } from "std-widgets.slint";
+
+global Theme {
+    out property <color> window: #14161b;
+    out property <color> card: #1c1f26;
+    out property <color> card-line: #2a2e38;
+    out property <color> inset: #101216;
+    out property <color> text: #e6e8ee;
+    out property <color> muted: #8b92a3;
+    // The Fluent style's own accent, so sliders and our drawing agree.
+    out property <color> accent: #60cdff;
+    out property <color> raw: #6d7486;
+    out property <color> good: #3ecfb2;
+    out property <color> bad: #e5695f;
+    out property <color> idle: #5a6072;
+    out property <length> radius: 10px;
+}
+
+export struct AxisRow {
+    name: string,
+    dead-zone: float,
+    dead-zone-max: float,
+    dead-zone-text: string,
+    sensitivity: float,
+    sensitivity-text: string,
+    curve: float,
+    curve-text: string,
+    limit: float,
+    limit-max: float,
+    limit-text: string,
+    invert: bool,
+    raw-text: string,
+    out-text: string,
+}
+
+component Card inherits Rectangle {
+    in property <string> title;
+    in property <string> hint;
+    background: Theme.card;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: Theme.card-line;
+    VerticalLayout {
+        padding: 16px;
+        spacing: 12px;
+        HorizontalLayout {
+            spacing: 10px;
+            Text {
+                text: root.title;
+                color: Theme.text;
+                font-size: 15px;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+            Text {
+                text: root.hint;
+                color: Theme.muted;
+                font-size: 12px;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
+        }
+        @children
+    }
+}
+
+component Pill inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    in property <color> dot;
+    height: 30px;
+    horizontal-stretch: 0;
+    border-radius: 15px;
+    background: Theme.card;
+    border-width: 1px;
+    border-color: Theme.card-line;
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 14px;
+        spacing: 8px;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: root.dot;
+            }
+        }
+        Text {
+            text: root.label;
+            color: Theme.muted;
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.value;
+            color: Theme.text;
+            font-size: 12px;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component Setting inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> value-text;
+    in property <float> minimum: 0;
+    in property <float> maximum: 1;
+    in property <float> value;
+    in property <bool> enabled: true;
+    callback changed(float);
+    spacing: 12px;
+    height: 30px;
+    Text {
+        text: root.label;
+        color: root.enabled ? Theme.text : Theme.muted;
+        font-size: 13px;
+        vertical-alignment: center;
+        width: 96px;
+    }
+    Slider {
+        minimum: root.minimum;
+        maximum: root.maximum;
+        value: root.value;
+        enabled: root.enabled;
+        horizontal-stretch: 1;
+        changed(v) => {
+            root.changed(v);
+        }
+    }
+    Text {
+        text: root.value-text;
+        color: root.enabled ? Theme.accent : Theme.muted;
+        font-size: 13px;
+        font-weight: 600;
+        vertical-alignment: center;
+        horizontal-alignment: right;
+        width: 76px;
+    }
+}
+
+component AxisEditor inherits Rectangle {
+    in property <AxisRow> axis;
+    in property <string> unit;
+    callback changed(string, float);
+    callback invert(bool);
+    background: Theme.inset;
+    border-radius: 8px;
+    VerticalLayout {
+        padding: 12px;
+        spacing: 4px;
+        HorizontalLayout {
+            spacing: 10px;
+            height: 26px;
+            Text {
+                text: root.axis.name;
+                color: Theme.text;
+                font-size: 13px;
+                font-weight: 600;
+                vertical-alignment: center;
+                width: 60px;
+            }
+            Text {
+                text: root.axis.raw-text + "  →  " + root.axis.out-text;
+                color: Theme.muted;
+                font-size: 12px;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            Switch {
+                text: "Invert";
+                checked: root.axis.invert;
+                toggled => {
+                    root.invert(self.checked);
+                }
+            }
+        }
+        Setting {
+            label: "Dead zone";
+            maximum: root.axis.dead-zone-max;
+            value: root.axis.dead-zone;
+            value-text: root.axis.dead-zone-text;
+            changed(v) => {
+                root.changed("dead_zone", v);
+            }
+        }
+        Setting {
+            label: "Sensitivity";
+            maximum: 5;
+            value: root.axis.sensitivity;
+            value-text: root.axis.sensitivity-text;
+            changed(v) => {
+                root.changed("sensitivity", v);
+            }
+        }
+        Setting {
+            label: "Curve";
+            minimum: 0.5;
+            maximum: 3;
+            value: root.axis.curve;
+            value-text: root.axis.curve-text;
+            changed(v) => {
+                root.changed("curve", v);
+            }
+        }
+        Setting {
+            label: "Limit";
+            maximum: root.axis.limit-max;
+            value: root.axis.limit;
+            value-text: root.axis.limit-text;
+            changed(v) => {
+                root.changed("limit", v);
+            }
+        }
+    }
+}
+
+// Where the head points: yaw across, pitch up and down. The faint dot is
+// what the tracker sees, the bright one is what the game gets.
+component LookPad inherits Rectangle {
+    in property <float> raw-x;
+    in property <float> raw-y;
+    in property <float> out-x;
+    in property <float> out-y;
+    in property <float> dead-x;
+    in property <float> dead-y;
+    in property <float> roll;
+    in property <bool> live;
+    background: Theme.inset;
+    border-radius: 8px;
+    clip: true;
+    min-height: 220px;
+    Rectangle {
+        x: 0;
+        y: parent.height / 2;
+        width: parent.width;
+        height: 1px;
+        background: Theme.card-line;
+    }
+    Rectangle {
+        x: parent.width / 2;
+        y: 0;
+        width: 1px;
+        height: parent.height;
+        background: Theme.card-line;
+    }
+    Rectangle {
+        width: max(2px, root.dead-x * parent.width);
+        height: max(2px, root.dead-y * parent.height);
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        border-radius: 4px;
+        background: #60cdff1a;
+        border-width: 1px;
+        border-color: #60cdff55;
+        visible: root.dead-x > 0 || root.dead-y > 0;
+    }
+    Rectangle {
+        width: 12px;
+        height: 12px;
+        border-radius: 6px;
+        background: Theme.raw;
+        x: parent.width / 2 + root.raw-x * parent.width / 2 - 6px;
+        y: parent.height / 2 - root.raw-y * parent.height / 2 - 6px;
+        visible: root.live;
+    }
+    Rectangle {
+        width: 44px;
+        height: 3px;
+        border-radius: 1.5px;
+        background: Theme.accent;
+        opacity: 0.55;
+        x: parent.width / 2 + root.out-x * parent.width / 2 - 22px;
+        y: parent.height / 2 - root.out-y * parent.height / 2 - 1.5px;
+        transform-rotation: root.roll * 1deg;
+        visible: root.live;
+    }
+    Rectangle {
+        width: 16px;
+        height: 16px;
+        border-radius: 8px;
+        background: Theme.accent;
+        x: parent.width / 2 + root.out-x * parent.width / 2 - 8px;
+        y: parent.height / 2 - root.out-y * parent.height / 2 - 8px;
+        visible: root.live;
+    }
+    Text {
+        text: "No head pose";
+        color: Theme.muted;
+        font-size: 13px;
+        visible: !root.live;
+    }
+}
+
+component Legend inherits HorizontalLayout {
+    in property <color> dot;
+    in property <string> label;
+    spacing: 6px;
+    VerticalLayout {
+        alignment: center;
+        Rectangle {
+            width: 9px;
+            height: 9px;
+            border-radius: 4.5px;
+            background: root.dot;
+        }
+    }
+    Text {
+        text: root.label;
+        color: Theme.muted;
+        font-size: 12px;
+        vertical-alignment: center;
+    }
+}
+
+export component App inherits Window {
+    title: "opentobii";
+    preferred-width: 1040px;
+    preferred-height: 760px;
+    min-width: 860px;
+    min-height: 560px;
+    background: Theme.window;
+    default-font-size: 13px;
+
+    in property <bool> daemon-connected;
+    in property <bool> driver-connected;
+    in property <bool> tracking;
+    in property <string> tracker-text: "Not tracking";
+    in property <string> game-text: "No game";
+    in property <bool> game-connected;
+    in property <string> notice;
+
+    in property <[string]> profiles;
+    in-out property <int> profile-index;
+    in property <bool> can-create;
+    in property <string> create-text;
+    in property <bool> can-delete;
+
+    in property <bool> smoothing-enabled;
+    in property <float> steadiness;
+    in property <string> steadiness-text;
+    in property <float> response;
+    in property <string> response-text;
+
+    in property <[AxisRow]> rotation;
+    in property <[AxisRow]> position;
+
+    in property <float> look-raw-x;
+    in property <float> look-raw-y;
+    in property <float> look-out-x;
+    in property <float> look-out-y;
+    in property <float> look-dead-x;
+    in property <float> look-dead-y;
+    in property <float> look-roll;
+    in property <string> look-range-text;
+
+    callback profile-selected(int);
+    callback create-profile();
+    callback delete-profile();
+    callback reset-profile();
+    callback recentre();
+    callback smoothing-toggled(bool);
+    callback steadiness-changed(float);
+    callback response-changed(float);
+    callback axis-changed(string, int, string, float);
+    callback axis-invert(string, int, bool);
+
+    about := PopupWindow {
+        x: (root.width - 320px) / 2;
+        y: (root.height - 260px) / 2;
+        width: 320px;
+        height: 260px;
+        Rectangle {
+            background: Theme.card;
+            border-radius: Theme.radius;
+            border-width: 1px;
+            border-color: Theme.card-line;
+            VerticalLayout {
+                padding: 20px;
+                spacing: 10px;
+                Text {
+                    text: "opentobii";
+                    color: Theme.text;
+                    font-size: 18px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: "Tobii Eye Tracker 5 for games under Proton.\nNot affiliated with Tobii. MIT licence.";
+                    color: Theme.muted;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+                AboutSlint { }
+            }
+        }
+    }
+
+    VerticalLayout {
+        padding: 18px;
+        spacing: 14px;
+
+        HorizontalLayout {
+            spacing: 10px;
+            height: 34px;
+            Text {
+                text: "opentobii";
+                color: Theme.text;
+                font-size: 20px;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+            Pill {
+                label: "Daemon";
+                value: root.daemon-connected ? "Running" : "Not running";
+                dot: root.daemon-connected ? Theme.good : Theme.bad;
+            }
+            Pill {
+                label: "Tracker";
+                value: root.tracker-text;
+                dot: root.tracking ? Theme.good : (root.driver-connected ? Theme.idle : Theme.bad);
+            }
+            Pill {
+                label: "Game";
+                value: root.game-text;
+                dot: root.game-connected ? Theme.good : Theme.idle;
+            }
+            Button {
+                text: "About";
+                clicked => {
+                    about.show();
+                }
+            }
+        }
+
+        if root.notice != "": Rectangle {
+            height: 34px;
+            border-radius: 8px;
+            background: #e5695f22;
+            border-width: 1px;
+            border-color: #e5695f66;
+            Text {
+                x: 14px;
+                width: parent.width - 28px;
+                text: root.notice;
+                color: #f0a59e;
+                font-size: 12px;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 14px;
+
+            VerticalLayout {
+                spacing: 14px;
+                width: 340px;
+
+                Card {
+                    title: "Live view";
+                    hint: root.look-range-text;
+                    LookPad {
+                        raw-x: root.look-raw-x;
+                        raw-y: root.look-raw-y;
+                        out-x: root.look-out-x;
+                        out-y: root.look-out-y;
+                        dead-x: root.look-dead-x;
+                        dead-y: root.look-dead-y;
+                        roll: root.look-roll;
+                        live: root.tracking;
+                    }
+                    HorizontalLayout {
+                        spacing: 16px;
+                        alignment: start;
+                        Legend {
+                            dot: Theme.raw;
+                            label: "Tracker";
+                        }
+                        Legend {
+                            dot: Theme.accent;
+                            label: "Sent to the game";
+                        }
+                    }
+                    Button {
+                        text: "Recentre: this is straight ahead";
+                        primary: true;
+                        enabled: root.tracking;
+                        clicked => {
+                            root.recentre();
+                        }
+                    }
+                }
+
+                Card {
+                    title: "Profile";
+                    hint: "";
+                    vertical-stretch: 0;
+                    ComboBox {
+                        model: root.profiles;
+                        current-index <=> root.profile-index;
+                        selected => {
+                            root.profile-selected(self.current-index);
+                        }
+                    }
+                    if root.can-create: Button {
+                        text: root.create-text;
+                        clicked => {
+                            root.create-profile();
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Button {
+                            text: "Reset to defaults";
+                            horizontal-stretch: 1;
+                            clicked => {
+                                root.reset-profile();
+                            }
+                        }
+                        Button {
+                            text: "Delete profile";
+                            horizontal-stretch: 1;
+                            enabled: root.can-delete;
+                            clicked => {
+                                root.delete-profile();
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    vertical-stretch: 1;
+                }
+            }
+
+            ScrollView {
+                horizontal-stretch: 1;
+                VerticalLayout {
+                    spacing: 14px;
+                    padding-right: 14px;
+
+                    Card {
+                        title: "Smoothing";
+                        hint: "Steadies the view. More steadiness, more lag at rest.";
+                        Switch {
+                            text: "Smooth head movement";
+                            checked: root.smoothing-enabled;
+                            toggled => {
+                                root.smoothing-toggled(self.checked);
+                            }
+                        }
+                        Setting {
+                            label: "Steadiness";
+                            maximum: 100;
+                            value: root.steadiness;
+                            value-text: root.steadiness-text;
+                            enabled: root.smoothing-enabled;
+                            changed(v) => {
+                                root.steadiness-changed(v);
+                            }
+                        }
+                        Setting {
+                            label: "Fast turns";
+                            maximum: 100;
+                            value: root.response;
+                            value-text: root.response-text;
+                            enabled: root.smoothing-enabled;
+                            changed(v) => {
+                                root.response-changed(v);
+                            }
+                        }
+                    }
+
+                    Card {
+                        title: "Turning";
+                        hint: "Degrees. Tracker → game.";
+                        for item[i] in root.rotation: AxisEditor {
+                            axis: item;
+                            changed(field, v) => {
+                                root.axis-changed("rotation", i, field, v);
+                            }
+                            invert(on) => {
+                                root.axis-invert("rotation", i, on);
+                            }
+                        }
+                    }
+
+                    Card {
+                        title: "Leaning";
+                        hint: "Millimetres. Needs a recentre first.";
+                        for item[i] in root.position: AxisEditor {
+                            axis: item;
+                            changed(field, v) => {
+                                root.axis-changed("position", i, field, v);
+                            }
+                            invert(on) => {
+                                root.axis-invert("position", i, on);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
