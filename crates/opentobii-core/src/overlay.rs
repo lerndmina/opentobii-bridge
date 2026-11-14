@@ -12,25 +12,25 @@ use crate::smooth::OneEuro;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Style {
-    /// A soft filled circle with a faint ring.
+    /// A glowing hollow ring.
     #[default]
     Bubble,
-    /// A ring only: hides less of what is being looked at.
-    Ring,
-    /// A small solid dot.
-    Dot,
+    /// A filled disc with a soft edge.
+    Solid,
+    /// A wide, soft glow with no hard edge.
+    Heatmap,
 }
 
 impl Style {
-    pub const ALL: [Self; 3] = [Self::Bubble, Self::Ring, Self::Dot];
+    pub const ALL: [Self; 3] = [Self::Bubble, Self::Solid, Self::Heatmap];
 
     /// The name shown in the tuning window.
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Bubble => "Bubble",
-            Self::Ring => "Ring",
-            Self::Dot => "Dot",
+            Self::Solid => "Solid",
+            Self::Heatmap => "Heatmap",
         }
     }
 }
@@ -52,6 +52,9 @@ pub struct Overlay {
     pub opacity: f64,
     /// 0 follows the eyes exactly, 100 is very steady and slow.
     pub smoothing: f64,
+    /// How much of the path just travelled stays visible behind the mark:
+    /// 0 is none, 100 is about half a second.
+    pub trail: f64,
     /// The monitor to draw on, by connector name such as `DP-4`. `None`
     /// uses the one the driver was last calibrated on.
     pub monitor: Option<String>,
@@ -62,10 +65,11 @@ impl Default for Overlay {
         Self {
             enabled: false,
             style: Style::Bubble,
-            size: 160.0,
+            size: 72.0,
             color: "#60cdff".to_owned(),
-            opacity: 0.45,
-            smoothing: 60.0,
+            opacity: 0.9,
+            smoothing: 45.0,
+            trail: 50.0,
             monitor: None,
         }
     }
@@ -103,6 +107,9 @@ impl Overlay {
         if !within(self.smoothing, (0.0, 100.0)) {
             return Err("overlay smoothing must be between 0 and 100".to_owned());
         }
+        if !within(self.trail, (0.0, 100.0)) {
+            return Err("overlay trail must be between 0 and 100".to_owned());
+        }
         if parse_color(&self.color).is_none() {
             return Err(format!(
                 "overlay colour `{}` must look like #60cdff",
@@ -126,11 +133,17 @@ impl Overlay {
     }
 }
 
-/// The filter cutoff at rest for a smoothing setting: 6 Hz at 0, 0.3 Hz at
+/// How long the trail behind the mark lasts for a trail setting, seconds.
+#[must_use]
+pub fn trail_seconds(trail: f64) -> f64 {
+    trail.clamp(0.0, 100.0) / 100.0 * 0.5
+}
+
+/// The filter cutoff at rest for a smoothing setting: 20 Hz at 0, 0.3 Hz at
 /// 100, evenly spaced by ratio.
 #[must_use]
 pub fn cutoff_for(smoothing: f64) -> f64 {
-    6.0 * (0.3f64 / 6.0).powf(smoothing.clamp(0.0, 100.0) / 100.0)
+    20.0 * (0.3f64 / 20.0).powf(smoothing.clamp(0.0, 100.0) / 100.0)
 }
 
 /// How fast the filter opens when the eyes jump, in Hz per screen-width per
@@ -227,13 +240,13 @@ mod tests {
     #[test]
     fn styles_read_and_write_as_lower_case_words() {
         let text = toml::to_string(&Overlay {
-            style: Style::Ring,
+            style: Style::Solid,
             ..Overlay::default()
         })
         .unwrap();
-        assert!(text.contains("style = \"ring\""), "{text}");
-        let back: Overlay = toml::from_str("style = \"dot\"\nsize = 40.0\n").unwrap();
-        assert_eq!((back.style, back.size), (Style::Dot, 40.0));
+        assert!(text.contains("style = \"solid\""), "{text}");
+        let back: Overlay = toml::from_str("style = \"heatmap\"\nsize = 40.0\n").unwrap();
+        assert_eq!((back.style, back.size), (Style::Heatmap, 40.0));
         assert!(toml::from_str::<Overlay>("style = \"square\"\n").is_err());
         assert!(
             toml::from_str::<Overlay>("colour = \"#ffffff\"\n").is_err(),
@@ -242,8 +255,19 @@ mod tests {
     }
 
     #[test]
+    fn the_trail_setting_is_checked_and_maps_to_half_a_second() {
+        let bad = Overlay {
+            trail: -1.0,
+            ..Overlay::default()
+        };
+        assert!(bad.validate().unwrap_err().contains("trail"));
+        assert_eq!(trail_seconds(0.0), 0.0);
+        assert_eq!(trail_seconds(100.0), 0.5);
+    }
+
+    #[test]
     fn more_smoothing_means_a_lower_cutoff() {
-        assert!((cutoff_for(0.0) - 6.0).abs() < 1e-9);
+        assert!((cutoff_for(0.0) - 20.0).abs() < 1e-9);
         assert!((cutoff_for(100.0) - 0.3).abs() < 1e-9);
         assert!(cutoff_for(60.0) < cutoff_for(30.0));
     }

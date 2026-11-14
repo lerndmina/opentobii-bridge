@@ -431,6 +431,13 @@ impl Ui {
         app.set_overlay_opacity_text(format!("{:.0}%", overlay.opacity * 100.0).into());
         app.set_overlay_smoothing(overlay.smoothing as f32);
         app.set_overlay_smoothing_text(format!("{:.0}", overlay.smoothing).into());
+        app.set_overlay_trail(overlay.trail as f32);
+        let trail = if overlay.trail > 0.0 {
+            format!("{:.0} ms", overlay::trail_seconds(overlay.trail) * 1000.0)
+        } else {
+            "Off".to_owned()
+        };
+        app.set_overlay_trail_text(trail.into());
     }
 
     fn select(&mut self, selected: Option<String>) {
@@ -1041,6 +1048,14 @@ pub fn run() -> Result<(), String> {
         move |value| {
             edit_overlay(&ui, &|overlay| {
                 overlay.smoothing = snap(f64::from(value), 5.0).clamp(0.0, 100.0)
+            });
+        }
+    });
+    app.on_overlay_trail_changed({
+        let ui = Rc::clone(&ui);
+        move |value| {
+            edit_overlay(&ui, &|overlay| {
+                overlay.trail = snap(f64::from(value), 5.0).clamp(0.0, 100.0)
             });
         }
     });

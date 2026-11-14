@@ -870,7 +870,7 @@ fn overlay_settings_are_checked_saved_and_announced() {
 
     let wanted = Overlay {
         enabled: false,
-        style: Style::Ring,
+        style: Style::Solid,
         size: 220.0,
         color: "#ff8000".into(),
         ..Overlay::default()

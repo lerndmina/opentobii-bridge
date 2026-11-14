@@ -180,14 +180,14 @@ mod tests {
             }
         );
         let overlay: Request = serde_json::from_str(
-            r#"{"cmd":"set_overlay","overlay":{"enabled":true,"style":"ring"}}"#,
+            r#"{"cmd":"set_overlay","overlay":{"enabled":true,"style":"solid"}}"#,
         )
         .unwrap();
         let Request::SetOverlay { overlay } = overlay else {
             panic!("a set_overlay request")
         };
         assert!(overlay.enabled);
-        assert_eq!(overlay.style, crate::overlay::Style::Ring);
+        assert_eq!(overlay.style, crate::overlay::Style::Solid);
         assert_eq!(overlay.size, Overlay::default().size);
         let set: Request = serde_json::from_str(
             r#"{"cmd":"set_profile","game":"eurotrucks2.exe","profile":{"yaw":{"sensitivity":2.0}}}"#,

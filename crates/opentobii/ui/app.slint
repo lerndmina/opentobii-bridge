@@ -403,6 +403,8 @@ export component App inherits Window {
     in property <string> overlay-opacity-text;
     in property <float> overlay-smoothing;
     in property <string> overlay-smoothing-text;
+    in property <float> overlay-trail;
+    in property <string> overlay-trail-text;
 
     callback profile-selected(int);
     callback create-profile();
@@ -416,6 +418,7 @@ export component App inherits Window {
     callback overlay-size-changed(float);
     callback overlay-opacity-changed(float);
     callback overlay-smoothing-changed(float);
+    callback overlay-trail-changed(float);
     callback smoothing-toggled(bool);
     callback steadiness-changed(float);
     callback response-changed(float);
@@ -781,6 +784,16 @@ export component App inherits Window {
                             enabled: root.overlay-enabled;
                             changed(v) => {
                                 root.overlay-smoothing-changed(v);
+                            }
+                        }
+                        Setting {
+                            label: "Trail";
+                            maximum: 100;
+                            value: root.overlay-trail;
+                            value-text: root.overlay-trail-text;
+                            enabled: root.overlay-enabled;
+                            changed(v) => {
+                                root.overlay-trail-changed(v);
                             }
                         }
                     }
