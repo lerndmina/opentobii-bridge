@@ -15,8 +15,10 @@ This repo does not contain a USB driver. It builds on an existing Linux driver f
 |---|---|---|
 | 1 | The game's Tobii DLL connects to a Linux listener on `127.0.0.1:4455` under Proton | Passed 2026-11-14, ETS2 with Tobii DLL 7.3.0.14, Proton-CachyOS |
 | 2 | Gaze reaches the game | Partly. On a fresh start the DLL ran its whole device start against the responder and accepted every reply (2026-11-14). The game then did not select the tracker: it matches trackers to monitors by a display id that only the helper can supply |
-| 3 | Helper in the prefix supplies display id and head pose | Helper, Linux service and prefix installer written and unit tested; not yet run with the game |
-| 4 | The helper starts by itself as a service in the prefix | Built in: the helper is a Windows service and the installer registers it. Not yet run |
+| 3 | Helper in the prefix supplies display id and head pose | Passed 2026-11-14, Proton-CachyOS. The game selected the tracker, subscribed to gaze and head pose, and the cabin view followed a synthetic yaw sweep |
+| 4 | The helper starts by itself as a service in the prefix | Passed 2026-11-14, Proton-CachyOS. Wine started the helper from the service key the installer adds to `system.reg` |
+
+Everything so far uses synthetic data: a canned head sweep and one recorded gaze frame. Not yet done: live data from a tracker, gaze features in the game, head position and timestamp mapping, and a run on Valve's stock Proton.
 
 ## Proof 1
 
@@ -45,6 +47,8 @@ python3 proofs/proof3_service.py 600
 ```
 
 `<prefix>` is the folder holding `system.reg`, for a Steam game `steamapps/compatdata/<appid>/pfx`. The installer copies the helper to `drive_c/opentobii/` and adds one service key to `system.reg`, keeping a backup beside it. `python3 -m opentobii_bridge.prefix uninstall <prefix>` removes both and leaves `system.reg` byte for byte as it was.
+
+In ETS2, eye tracking also has to be switched on in the game's options. With that on, the interior view swings slowly left and right while the service runs. The game writes no `[Tobii]` line to `game.log.txt`, so the log does not show whether it worked.
 
 ## Tests
 
