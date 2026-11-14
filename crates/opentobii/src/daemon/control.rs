@@ -6,13 +6,13 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use opentobii_core::config::game_key;
-use opentobii_core::control::{GameStatus, Line, RawPose, Request, Status};
+use opentobii_core::control::{GameStatus, GazePoint, Line, RawPose, Request, Status};
 
 use super::{effective, spawn, Shared, State};
 
@@ -29,6 +29,9 @@ const TRACKING_WINDOW: Duration = Duration::from_secs(1);
 pub(super) struct Watcher {
     id: u64,
     stream: Mutex<UnixStream>,
+    /// The feeds this client asked for.
+    poses: AtomicBool,
+    gaze: AtomicBool,
 }
 
 impl Watcher {
@@ -94,6 +97,8 @@ fn serve(shared: &Shared, stream: UnixStream) -> io::Result<()> {
     let watcher = Arc::new(Watcher {
         id: shared.next_conn.fetch_add(1, Ordering::Relaxed),
         stream: Mutex::new(writer),
+        poses: AtomicBool::new(false),
+        gaze: AtomicBool::new(false),
     });
     let result = requests(shared, stream, &watcher);
     shared.lock().watchers.retain(|w| w.id != watcher.id);
@@ -142,7 +147,22 @@ fn handle(shared: &Shared, request: Request, watcher: &Arc<Watcher>) -> Line {
             config: state.tuning.clone(),
             status: status(shared, state),
         },
-        Request::Subscribe => {
+        Request::SetOverlay { overlay } => {
+            if let Err(reason) = overlay.validate() {
+                return refuse(reason);
+            }
+            state.tuning.overlay = overlay.clone();
+            let watchers = state.watchers.clone();
+            let problem = apply(shared, state);
+            // Told while the state is locked, so every subscriber sees the
+            // changes in the order they were made.
+            broadcast_locked(state, &watchers, &Line::Overlay(overlay));
+            shared.overlay_changed();
+            problem.unwrap_or(Line::Ok)
+        }
+        Request::Subscribe { poses, gaze } => {
+            watcher.poses.store(poses, Ordering::Relaxed);
+            watcher.gaze.store(gaze, Ordering::Relaxed);
             if !state.watchers.iter().any(|w| w.id == watcher.id) {
                 state.watchers.push(Arc::clone(watcher));
             }
@@ -236,6 +256,16 @@ fn status(shared: &Shared, state: &State) -> Status {
     }
 }
 
+/// As [`broadcast`], for a caller that already holds the state lock.
+fn broadcast_locked(state: &mut State, watchers: &[Arc<Watcher>], line: &Line) {
+    for watcher in watchers {
+        if watcher.send(line).is_err() {
+            watcher.close();
+            state.watchers.retain(|w| w.id != watcher.id);
+        }
+    }
+}
+
 /// Send one line to every watcher; drop the ones that fail.
 fn broadcast(shared: &Shared, watchers: &[Arc<Watcher>], line: &Line) {
     for watcher in watchers {
@@ -247,7 +277,21 @@ fn broadcast(shared: &Shared, watchers: &[Arc<Watcher>], line: &Line) {
 }
 
 pub(super) fn send_pose(shared: &Shared, watchers: &[Arc<Watcher>], pose: RawPose) {
-    broadcast(shared, watchers, &Line::Pose(pose));
+    let wanting: Vec<Arc<Watcher>> = watchers
+        .iter()
+        .filter(|w| w.poses.load(Ordering::Relaxed))
+        .cloned()
+        .collect();
+    broadcast(shared, &wanting, &Line::Pose(pose));
+}
+
+pub(super) fn send_gaze(shared: &Shared, watchers: &[Arc<Watcher>], gaze: GazePoint) {
+    let wanting: Vec<Arc<Watcher>> = watchers
+        .iter()
+        .filter(|w| w.gaze.load(Ordering::Relaxed))
+        .cloned()
+        .collect();
+    broadcast(shared, &wanting, &Line::Gaze(gaze));
 }
 
 /// Tell subscribers what is connected, once a second.

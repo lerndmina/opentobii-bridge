@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::overlay::Overlay;
 use crate::pipeline::Profile;
 
 /// Everything in the settings file.
@@ -30,6 +31,8 @@ pub struct Config {
     pub default: Profile,
     /// Profiles by executable name, as [`game_key`] spells it.
     pub games: BTreeMap<String, Profile>,
+    /// The on-screen gaze mark.
+    pub overlay: Overlay,
 }
 
 /// Why the settings file could not be used.
@@ -94,6 +97,7 @@ impl Config {
     /// Check every profile, and that every game is named as [`game_key`]
     /// would name it.
     pub fn validate(&self) -> Result<(), Error> {
+        self.overlay.validate().map_err(Error::Invalid)?;
         self.default
             .validate()
             .map_err(|reason| Error::Invalid(format!("default profile: {reason}")))?;

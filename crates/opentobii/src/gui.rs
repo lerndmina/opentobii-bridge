@@ -671,7 +671,16 @@ fn follow(events: Sender<Event>) {
                     ask(&mut stream, &mut reader, &Request::Get)
                 {
                     let _ = events.send(Event::Connected(Box::new(config), status));
-                    if ask(&mut stream, &mut reader, &Request::Subscribe).is_ok() {
+                    if ask(
+                        &mut stream,
+                        &mut reader,
+                        &Request::Subscribe {
+                            poses: true,
+                            gaze: false,
+                        },
+                    )
+                    .is_ok()
+                    {
                         let mut text = String::new();
                         loop {
                             text.clear();

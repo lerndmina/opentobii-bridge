@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
+use crate::overlay::Overlay;
 use crate::pipeline::{Neutral, Profile};
 
 /// Where the daemon listens: `$XDG_RUNTIME_DIR/opentobii.sock`, else
@@ -49,8 +50,23 @@ pub enum Request {
         #[serde(default)]
         game: Option<String>,
     },
-    /// Start receiving [`Line::Pose`] and [`Line::Status`].
-    Subscribe,
+    /// Replace the gaze overlay's settings. Subscribers are sent
+    /// [`Line::Overlay`]; the daemon starts or stops the overlay to match.
+    SetOverlay { overlay: Overlay },
+    /// Start receiving [`Line::Status`] and [`Line::Overlay`], and the
+    /// feeds asked for. A bare `{"cmd":"subscribe"}` asks for head poses.
+    Subscribe {
+        /// Send [`Line::Pose`].
+        #[serde(default = "yes")]
+        poses: bool,
+        /// Send [`Line::Gaze`].
+        #[serde(default)]
+        gaze: bool,
+    },
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// One line from the daemon.
@@ -70,6 +86,10 @@ pub enum Line {
     Error { reason: String },
     /// A head pose as the tracker reported it, before any shaping.
     Pose(RawPose),
+    /// Where the user is looking, unsmoothed.
+    Gaze(GazePoint),
+    /// The overlay's settings changed.
+    Overlay(Overlay),
     /// Sent about once a second to subscribers.
     Status(Status),
 }
@@ -83,6 +103,19 @@ pub struct RawPose {
     /// Pitch, yaw, roll.
     pub rotation_deg: [f32; 3],
     /// False when the tracker marked any part of the pose as not measured.
+    pub valid: bool,
+}
+
+/// A gaze point on the screen the tracker is mounted on.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct GazePoint {
+    /// `CLOCK_MONOTONIC` microseconds.
+    pub micros: i64,
+    /// Across the screen: 0 is the left edge, 1 the right.
+    pub x: f32,
+    /// Down the screen: 0 is the top edge, 1 the bottom.
+    pub y: f32,
+    /// False when the tracker has no gaze for this sample.
     pub valid: bool,
 }
 
@@ -131,6 +164,31 @@ mod tests {
             serde_json::from_str::<Request>(r#"{"cmd":"recentre"}"#).unwrap(),
             Request::Recentre { game: None }
         );
+        assert_eq!(
+            serde_json::from_str::<Request>(r#"{"cmd":"subscribe"}"#).unwrap(),
+            Request::Subscribe {
+                poses: true,
+                gaze: false
+            }
+        );
+        assert_eq!(
+            serde_json::from_str::<Request>(r#"{"cmd":"subscribe","poses":false,"gaze":true}"#)
+                .unwrap(),
+            Request::Subscribe {
+                poses: false,
+                gaze: true
+            }
+        );
+        let overlay: Request = serde_json::from_str(
+            r#"{"cmd":"set_overlay","overlay":{"enabled":true,"style":"ring"}}"#,
+        )
+        .unwrap();
+        let Request::SetOverlay { overlay } = overlay else {
+            panic!("a set_overlay request")
+        };
+        assert!(overlay.enabled);
+        assert_eq!(overlay.style, crate::overlay::Style::Ring);
+        assert_eq!(overlay.size, Overlay::default().size);
         let set: Request = serde_json::from_str(
             r#"{"cmd":"set_profile","game":"eurotrucks2.exe","profile":{"yaw":{"sensitivity":2.0}}}"#,
         )
@@ -157,6 +215,13 @@ mod tests {
     fn lines_round_trip() {
         let lines = [
             Line::Ok,
+            Line::Gaze(GazePoint {
+                micros: 9,
+                x: 0.25,
+                y: 0.75,
+                valid: true,
+            }),
+            Line::Overlay(Overlay::default()),
             Line::Error {
                 reason: "no".into(),
             },

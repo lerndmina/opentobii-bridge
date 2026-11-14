@@ -12,7 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use opentobii_core::config::{game_key, Config as Tuning};
-use opentobii_core::control::RawPose;
+use opentobii_core::control::{GazePoint, RawPose};
 use opentobii_core::pipeline::{Pipeline, Pose, Profile};
 use opentobii_proto::frames::{self, DisplayFrame, Template};
 use opentobii_proto::tobiid::{self, GazeRaw, HeadPose, ServerMsg};
@@ -235,6 +235,9 @@ impl Shared {
         }
         sent
     }
+
+    /// The overlay's settings changed: start, stop or leave it, to match.
+    fn overlay_changed(&self) {}
 
     fn forget(&self, id: u64) {
         let mut state = self.lock();
@@ -717,13 +720,31 @@ fn driver_loop(shared: &Shared, mut stream: UnixStream) -> io::Result<()> {
 }
 
 fn on_gaze(shared: &Shared, raw: &GazeRaw) {
-    let (sinks, display, offset) = {
+    let (sinks, display, offset, watchers) = {
         let state = shared.lock();
-        if state.gaze_sinks.is_empty() {
-            return;
-        }
-        (state.gaze_sinks.clone(), state.display, state.clock_offset)
+        (
+            state.gaze_sinks.clone(),
+            state.display,
+            state.clock_offset,
+            state.watchers.clone(),
+        )
     };
+    if !watchers.is_empty() {
+        let [x, y] = raw.combined_on_display;
+        control::send_gaze(
+            shared,
+            &watchers,
+            GazePoint {
+                micros: raw.host_micros.unwrap_or_else(monotonic_micros),
+                x,
+                y,
+                valid: raw.combined_validity == 1 && x.is_finite() && y.is_finite(),
+            },
+        );
+    }
+    if sinks.is_empty() {
+        return;
+    }
     let micros = shared.game_micros(raw.host_micros, offset);
     let payload = frames::gaze_frame(&shared.gaze_template, raw, micros, display.as_ref());
     if shared.broadcast(&sinks, &Message::stream(STREAM_GAZE, payload).encode()) > 0 {

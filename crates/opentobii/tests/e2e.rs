@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use opentobii::daemon::{monotonic_micros, start, Config, Running};
 use opentobii_core::config::Config as Tuning;
 use opentobii_core::control::{Line, Request};
+use opentobii_core::overlay::{Overlay, Style};
 use opentobii_core::pipeline::{Axis, Profile, Smoothing};
 use opentobii_proto::frames::{display_area_corners, keyed_values, Keyed};
 use opentobii_proto::sesp;
@@ -695,7 +696,13 @@ fn a_game_profile_can_be_added_and_removed_live() {
 fn subscribers_get_raw_poses_and_status() {
     let mut rig = rig(Tuning::default());
     let mut control = Control::connect(&rig);
-    assert_eq!(control.ask(&Request::Subscribe), Line::Ok);
+    assert_eq!(
+        control.ask(&Request::Subscribe {
+            poses: true,
+            gaze: false,
+        }),
+        Line::Ok
+    );
     thread::sleep(Duration::from_millis(50));
 
     send_yaw(&mut rig, 7.0);
@@ -791,4 +798,84 @@ fn a_notification_makes_the_daemon_fetch_the_display_area_again() {
         assert!(Instant::now() < deadline, "the game is told the new area");
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[test]
+fn a_gaze_subscriber_gets_gaze_and_not_poses() {
+    let mut rig = rig(unsmoothed());
+    let mut control = Control::connect(&rig);
+    let subscribe = Request::Subscribe {
+        poses: false,
+        gaze: true,
+    };
+    assert_eq!(control.ask(&subscribe), Line::Ok);
+    thread::sleep(Duration::from_millis(50));
+
+    send_yaw(&mut rig, 7.0);
+    let host = monotonic_micros();
+    let lost = GazeRaw {
+        combined_validity: 0,
+        ..sample(host)
+    };
+    rig.driver
+        .write_all(&tobiid::frame(&gaze_raw_body(&sample(host))))
+        .unwrap();
+    rig.driver
+        .write_all(&tobiid::frame(&gaze_raw_body(&lost)))
+        .unwrap();
+
+    // The pose sent first is not passed on: the first line is the gaze.
+    let Line::Gaze(gaze) = control.line() else {
+        panic!("a gaze line")
+    };
+    assert_eq!(
+        (gaze.x, gaze.y, gaze.valid, gaze.micros),
+        (0.125, 0.875, true, host)
+    );
+    let Line::Gaze(gaze) = control.line() else {
+        panic!("a second gaze line")
+    };
+    assert!(!gaze.valid);
+}
+
+#[test]
+fn overlay_settings_are_checked_saved_and_announced() {
+    let rig = rig(unsmoothed());
+    let mut watcher = Control::connect(&rig);
+    let quiet = Request::Subscribe {
+        poses: false,
+        gaze: false,
+    };
+    assert_eq!(watcher.ask(&quiet), Line::Ok);
+    let mut control = Control::connect(&rig);
+
+    let bad = Overlay {
+        size: 1.0,
+        ..Overlay::default()
+    };
+    let refused = control.ask(&Request::SetOverlay { overlay: bad });
+    assert!(
+        matches!(refused, Line::Error { ref reason } if reason.contains("size")),
+        "{refused:?}"
+    );
+
+    let wanted = Overlay {
+        enabled: false,
+        style: Style::Ring,
+        size: 220.0,
+        color: "#ff8000".into(),
+        ..Overlay::default()
+    };
+    let set = Request::SetOverlay {
+        overlay: wanted.clone(),
+    };
+    assert_eq!(control.ask(&set), Line::Ok);
+    assert_eq!(watcher.line(), Line::Overlay(wanted.clone()));
+
+    let Line::State { config, .. } = control.ask(&Request::Get) else {
+        panic!("a state line")
+    };
+    assert_eq!(config.overlay, wanted);
+    let saved = Tuning::load(&rig._dir.0.join("config.toml")).unwrap();
+    assert_eq!(saved.overlay, wanted);
 }
