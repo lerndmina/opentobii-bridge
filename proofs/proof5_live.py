@@ -30,7 +30,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "proofs"))
 
-from opentobii_bridge import frames, sesp, tobiid, ttp  # noqa: E402
+from opentobii_bridge import frames, sesp, smooth, tobiid, ttp  # noqa: E402
 from proof2_replay import PORT as TTP_PORT, STREAM_GAZE, STREAM_PRESENCE, Replay, log  # noqa: E402
 from proof3_service import RELAY_PORT, Services  # noqa: E402
 
@@ -129,8 +129,10 @@ class LiveReplay(Replay):
 class LiveServices(Services):
     """The services side, with head poses pushed from tobiid's samples."""
 
-    def __init__(self, replay: LiveReplay, monitor_index: int | None) -> None:
+    def __init__(self, replay: LiveReplay, monitor_index: int | None,
+                 pose_filter: smooth.PoseFilter | None = None) -> None:
         super().__init__(replay, monitor_index)
+        self.pose_filter = pose_filter
         self.sequences: dict[int, int] = {}
         self.poses_skipped = 0
 
@@ -147,6 +149,11 @@ class LiveServices(Services):
             # yet, so an invalid pose is dropped rather than sent as valid.
             self.poses_skipped += 1
             return
+        position, rotation = pose.position_mm, pose.rotation_rad
+        if self.pose_filter is not None:
+            # Filter every pose, wanted or not, so the state is warm when a
+            # game subscribes.
+            position, rotation = self.pose_filter(pose.host_micros, position, rotation)
         micros = self.replay.game_micros(pose.host_micros)
         for pid in list(self.posing):
             writer = self.subscribers.get(pid)
@@ -154,7 +161,7 @@ class LiveServices(Services):
                 continue
             sequence = self.sequences[pid] = self.sequences.get(pid, 0) + 1
             writer.write(sesp.frame(
-                sesp.head_pose(sequence, micros, pose.position_mm, pose.rotation_rad)
+                sesp.head_pose(sequence, micros, position, rotation)
             ))
             self.poses_sent += 1
 
@@ -226,13 +233,27 @@ async def main() -> None:
     parser.add_argument("seconds", nargs="?", type=float, default=1800)
     parser.add_argument("--monitor", type=int, default=None, help="index of the monitor to report")
     parser.add_argument("--socket", type=pathlib.Path, default=tobiid.socket_path())
+    defaults = smooth.Settings()
+    parser.add_argument("--no-smooth", action="store_true", help="send head poses unfiltered")
+    parser.add_argument("--rot-cutoff", type=float, default=defaults.rotation_min_cutoff,
+                        help="rotation filter cutoff at rest, Hz: lower is steadier")
+    parser.add_argument("--rot-beta", type=float, default=defaults.rotation_beta,
+                        help="how fast the rotation filter opens with speed")
+    parser.add_argument("--pos-cutoff", type=float, default=defaults.position_min_cutoff)
+    parser.add_argument("--pos-beta", type=float, default=defaults.position_beta)
     args = parser.parse_args()
+    pose_filter = None if args.no_smooth else smooth.PoseFilter(smooth.Settings(
+        args.rot_cutoff, args.rot_beta, args.pos_cutoff, args.pos_beta
+    ))
 
     replay = LiveReplay()
-    services = LiveServices(replay, args.monitor)
+    services = LiveServices(replay, args.monitor, pose_filter)
     ttp_server = await asyncio.start_server(replay.handle, "127.0.0.1", TTP_PORT)
     relay_server = await asyncio.start_server(services.handle, "127.0.0.1", RELAY_PORT)
     log(f"listening: TTP on {TTP_PORT}, services relay on {RELAY_PORT}, for {args.seconds:.0f}s")
+    log("head pose smoothing: " + ("off" if pose_filter is None else
+        f"rotation {args.rot_cutoff} Hz beta {args.rot_beta},"
+        f" position {args.pos_cutoff} Hz beta {args.pos_beta}"))
     follower = asyncio.create_task(follow_tobiid(args.socket, replay, services))
     async with ttp_server, relay_server:
         await asyncio.sleep(args.seconds)

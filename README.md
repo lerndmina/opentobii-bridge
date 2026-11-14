@@ -17,9 +17,9 @@ This repo does not contain a USB driver. It builds on an existing Linux driver f
 | 2 | Gaze reaches the game | Partly. On a fresh start the DLL ran its whole device start against the responder and accepted every reply (2026-11-14). The game then did not select the tracker: it matches trackers to monitors by a display id that only the helper can supply |
 | 3 | Helper in the prefix supplies display id and head pose | Passed 2026-11-14, Proton-CachyOS. The game selected the tracker, subscribed to gaze and head pose, and the cabin view followed a synthetic yaw sweep |
 | 4 | The helper starts by itself as a service in the prefix | Passed 2026-11-14, Proton-CachyOS. Wine started the helper from the service key the installer adds to `system.reg` |
-| 5 | Live gaze and head pose from a tracker reach the game | Written and tested against a fake daemon (2026-11-14). Not yet run: needs the Skyggedans driver installed and its `tobiid` running |
+| 5 | Live gaze and head pose from a tracker reach the game | Passed 2026-11-14, Proton-CachyOS, Skyggedans tobii-linux 0.6.0. The cabin view follows real head movement with no noticeable lag. Unfiltered it was jittery, so head pose is now smoothed |
 
-Everything run with the game so far used synthetic data: a canned head sweep and one recorded gaze frame. Not yet done: a run with live data, gaze features in the game, and a run on Valve's stock Proton.
+Not yet done: gaze features in the game, tuning of the head pose smoothing, and a run on Valve's stock Proton.
 
 ## Proof 1
 
@@ -58,6 +58,10 @@ python3 proofs/proof5_live.py 1800
 ```
 
 As proof 3, with the data taken from `tobiid`, the daemon of [Skyggedans/tobii-linux](https://github.com/Skyggedans/tobii-linux), on its socket at `$XDG_RUNTIME_DIR/tobiid.sock`. It subscribes to raw gaze, presence and head pose and asks for the display area. Gaze and presence frames are rebuilt in the tracker's own layout from the live values, using a recorded frame as the template. Head poses are passed on as they come.
+
+Head pose is smoothed with a One Euro filter, because `tobiid`'s estimate has a few tenths of a degree of frame-to-frame noise and the game scales rotation up. `--rot-cutoff` (default 0.8 Hz) sets how steady a still head is: lower is steadier and slower to settle. `--rot-beta` (default 0.1) sets how closely fast turns are followed. `--no-smooth` turns it off.
+
+After its last client leaves, `tobiid` restarts the tracker, and a client that connects during the restart waits about 12 seconds for its first sample.
 
 Known gaps:
 
