@@ -32,6 +32,16 @@ cargo build --release
 
 It needs `tobiid` running and the helper installed in the game's prefix (see proof 3 for the install command until the Rust installer exists). It does what proof 5 does: live gaze, presence and smoothed head pose to the game, with the driver's display area. `--no-smooth`, `--monitor N` and `--socket PATH` are the only options so far; the tuning settings and GUI are not built yet.
 
+### Settings
+
+Tuning lives in `~/.config/opentobii/config.toml` (or `--config PATH`): one `[default]` profile and one per game under `[games."name.exe"]`. Each axis (`pitch`, `yaw`, `roll`, `x`, `y`, `z`) has `dead_zone`, `sensitivity`, `curve`, `invert` and `limit`; `[default.smoothing]` holds the filter settings. A file with a mistake in it stops the daemon from starting and says what is wrong.
+
+Per-game profiles need the helper built from this version (hello `OTB2`), which reports the game's executable. With an older helper every game uses the default profile.
+
+### Control socket
+
+The daemon listens on `$XDG_RUNTIME_DIR/opentobii.sock`, one JSON object per line. Requests: `{"cmd":"get"}`, `{"cmd":"set_profile","game":"name.exe","profile":{...}}` (leave `game` out for the default), `{"cmd":"delete_profile","game":"name.exe"}`, `{"cmd":"recentre"}` and `{"cmd":"subscribe"}` for a feed of raw head poses and a status line every second. Changes apply on the next pose and are saved to the settings file. The tuning GUI will use this; it is not built yet.
+
 ```sh
 cargo test
 ```
