@@ -8,6 +8,8 @@
 //!   the services pipe that carries the display id and head pose (47455).
 
 pub mod daemon;
+pub mod prefix;
 mod recorded;
+pub mod steam;
 
 pub use daemon::{start, Config, Running};

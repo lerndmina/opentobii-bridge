@@ -30,7 +30,20 @@ cargo build --release
 ./target/release/opentobii daemon
 ```
 
-It needs `tobiid` running and the helper installed in the game's prefix (see proof 3 for the install command until the Rust installer exists). It does what proof 5 does: live gaze, presence and smoothed head pose to the game, with the driver's display area. `--no-smooth`, `--monitor N` and `--socket PATH` are the only options so far; the tuning settings and GUI are not built yet.
+It needs `tobiid` running and the helper installed in the game's prefix (see below). It does what proof 5 does: live gaze, presence and smoothed head pose to the game, with the driver's display area. `--no-smooth`, `--monitor N` and `--socket PATH` are the only options so far; the tuning settings and GUI are not built yet.
+
+### Setting up a game
+
+```sh
+opentobii games              # installed Steam games that ship Tobii's DLL
+opentobii install 227300     # by app id, part of the name, or a prefix path
+opentobii uninstall 227300
+opentobii status             # what the running daemon is connected to
+```
+
+`install` puts the helper (built into the binary) under `drive_c/opentobii/` in the game's prefix and adds one service key to `system.reg`, keeping a backup beside it. `uninstall` removes both and leaves `system.reg` byte for byte as it was. Both refuse to run while the game is open. Building needs `mingw64-gcc` for the helper; without it the binary builds with no helper inside and `install` takes `--helper PATH`.
+
+To start the daemon at login, copy the binary to `~/.local/bin/` and `packaging/opentobii.service` to `~/.config/systemd/user/`, then `systemctl --user enable --now opentobii`.
 
 ### Settings
 

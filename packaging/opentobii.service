@@ -1,0 +1,13 @@
+[Unit]
+Description=opentobii bridge (Tobii Eye Tracker 5 for games under Proton)
+Documentation=https://github.com/lerndmina/opentobii-bridge
+After=tobiid.service
+Wants=tobiid.socket
+
+[Service]
+ExecStart=%h/.local/bin/opentobii daemon
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
