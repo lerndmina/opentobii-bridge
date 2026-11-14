@@ -21,6 +21,23 @@ This repo does not contain a USB driver. It builds on an existing Linux driver f
 
 Not yet done: gaze features in the game, tuning of the head pose smoothing, and a run on Valve's stock Proton.
 
+## The daemon
+
+The Python proofs are being replaced by one Rust program. Build and run it with:
+
+```sh
+cargo build --release
+./target/release/opentobii daemon
+```
+
+It needs `tobiid` running and the helper installed in the game's prefix (see proof 3 for the install command until the Rust installer exists). It does what proof 5 does: live gaze, presence and smoothed head pose to the game, with the driver's display area. `--no-smooth`, `--monitor N` and `--socket PATH` are the only options so far; the tuning settings and GUI are not built yet.
+
+```sh
+cargo test
+```
+
+runs the Rust tests, including an end-to-end test with a fake driver, game and helper.
+
 ## Proof 1
 
 ```sh
