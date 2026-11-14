@@ -77,4 +77,4 @@ python3 -m unittest discover -s tests
 
 ## Licence
 
-Not chosen yet.
+MIT, see `LICENSE`. The recorded messages in `fixtures/et5` are from Skyggedans/tobii-linux, also MIT, see `fixtures/et5/LICENSE-skyggedans`.
