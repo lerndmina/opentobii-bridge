@@ -53,6 +53,31 @@ The release also carries an rpm, a deb and a tarball with an `install.sh`, for p
 
 The tuning window's Gaze overlay card switches on a mark that shows where you are looking, with a short trail behind it, drawn above everything including a full-screen game. Style (Bubble, Solid, Heatmap), colour, size, opacity, smoothing and trail are adjustable. It needs a Wayland desktop with the layer-shell protocol: KDE Plasma, Sway, Hyprland or COSMIC. Screen-capture software only shows it when capturing the whole screen.
 
+## Face login camera (experimental)
+
+The tracker films you in infrared to find your eyes. The daemon can publish that picture as a webcam, so a face login program such as [Howdy](https://github.com/boltgolt/howdy) can use the tracker instead of a laptop's IR camera. This part has not yet been tested against a real device.
+
+It needs the `v4l2loopback` kernel module, with one device set aside for it. On Fedora, with RPM Fusion enabled:
+
+```bash
+sudo dnf install akmod-v4l2loopback v4l-utils
+echo 'options v4l2loopback devices=1 video_nr=10 card_label="Tobii IR camera" exclusive_caps=1' | sudo tee /etc/modprobe.d/opentobii-camera.conf
+echo v4l2loopback | sudo tee /etc/modules-load.d/opentobii-camera.conf
+sudo akmods --force && sudo modprobe v4l2loopback
+```
+
+Then switch on "Face login camera" in the tuning window, or put this in `~/.config/opentobii/config.toml` and restart the daemon:
+
+```toml
+[camera]
+enabled = true
+device = "/dev/video10"
+```
+
+`opentobii status` says what the camera is doing. The picture is 560 by 560, grey, enlarged from the tracker's 280 by 280 with its brightness stretched.
+
+The daemon asks the driver for pictures only while some program has the camera open and streaming, so nothing is published between logins. Any program allowed to open cameras can read the device while it is switched on.
+
 ## The daemon
 
 The Python proofs are being replaced by one Rust program. Build and run it with:

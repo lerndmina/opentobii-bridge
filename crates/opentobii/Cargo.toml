@@ -58,7 +58,7 @@ slint = { version = "1.18", optional = true }
 # The versions Slint's window backend already brings in, so nothing is built twice.
 smithay-client-toolkit = { version = "0.19", default-features = false, features = ["calloop"], optional = true }
 wayland-client = { version = "0.31", optional = true }
-rustix = { version = "1.1", features = ["time"] }
+rustix = { version = "1.1", features = ["event", "time"] }
 
 [dev-dependencies]
 minisign = "0.10"

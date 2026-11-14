@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::camera::Camera;
 use crate::overlay::Overlay;
 use crate::pipeline::Profile;
 
@@ -33,6 +34,8 @@ pub struct Config {
     pub games: BTreeMap<String, Profile>,
     /// The on-screen gaze mark.
     pub overlay: Overlay,
+    /// The infrared picture as a camera, for face login.
+    pub camera: Camera,
     pub updates: Updates,
 }
 
@@ -114,6 +117,7 @@ impl Config {
     /// would name it.
     pub fn validate(&self) -> Result<(), Error> {
         self.overlay.validate().map_err(Error::Invalid)?;
+        self.camera.validate().map_err(Error::Invalid)?;
         self.default
             .validate()
             .map_err(|reason| Error::Invalid(format!("default profile: {reason}")))?;

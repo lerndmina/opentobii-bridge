@@ -21,6 +21,7 @@ use opentobii_proto::{sesp, tobiid as driver};
 
 use crate::recorded;
 
+mod camera;
 mod control;
 
 pub const TTP_PORT: u16 = 4455;
@@ -181,6 +182,8 @@ struct State {
     driver_connected: bool,
     last_pose: Option<Instant>,
     display_width_mm: Option<f64>,
+    /// What the face login camera is doing, in words.
+    camera_status: String,
     /// Control clients that subscribed to poses and status.
     watchers: Vec<Arc<control::Watcher>>,
 }
@@ -298,6 +301,7 @@ pub fn start(config: Config) -> io::Result<Running> {
             driver_connected: false,
             last_pose: None,
             display_width_mm: None,
+            camera_status: String::new(),
             watchers: Vec::new(),
         }),
         replies: recorded::replies(),
@@ -335,6 +339,7 @@ pub fn start(config: Config) -> io::Result<Running> {
             spawn("overlay-keeper", Arc::clone(&shared), keep_overlay);
         }
     }
+    spawn("camera", Arc::clone(&shared), camera::run);
     spawn("tobiid", shared, follow_driver);
     Ok(running)
 }

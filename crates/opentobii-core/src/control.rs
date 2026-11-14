@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::camera::Camera;
 use crate::config::Config;
 use crate::overlay::Overlay;
 use crate::pipeline::{Neutral, Profile};
@@ -53,6 +54,9 @@ pub enum Request {
     /// Replace the gaze overlay's settings. Subscribers are sent
     /// [`Line::Overlay`]; the daemon starts or stops the overlay to match.
     SetOverlay { overlay: Overlay },
+    /// Replace the face login camera's settings. Subscribers are sent
+    /// [`Line::Camera`]; the daemon starts or stops publishing to match.
+    SetCamera { camera: Camera },
     /// Start receiving [`Line::Status`] and [`Line::Overlay`], and the
     /// feeds asked for. A bare `{"cmd":"subscribe"}` asks for head poses.
     Subscribe {
@@ -90,6 +94,8 @@ pub enum Line {
     Gaze(GazePoint),
     /// The overlay's settings changed.
     Overlay(Overlay),
+    /// The face login camera's settings changed.
+    Camera(Camera),
     /// Sent about once a second to subscribers.
     Status(Status),
 }
@@ -134,6 +140,10 @@ pub struct Status {
     /// Where settings are saved; `None` when the daemon was started without
     /// a settings file.
     pub settings_path: Option<PathBuf>,
+    /// What the face login camera is doing, in words; empty from a daemon
+    /// older than the camera.
+    #[serde(default)]
+    pub camera: String,
 }
 
 /// One connected game process.
@@ -183,6 +193,17 @@ mod tests {
             r#"{"cmd":"set_overlay","overlay":{"enabled":true,"style":"solid"}}"#,
         )
         .unwrap();
+        let camera: Request =
+            serde_json::from_str(r#"{"cmd":"set_camera","camera":{"enabled":true}}"#).unwrap();
+        assert_eq!(
+            camera,
+            Request::SetCamera {
+                camera: crate::camera::Camera {
+                    enabled: true,
+                    ..Default::default()
+                }
+            }
+        );
         let Request::SetOverlay { overlay } = overlay else {
             panic!("a set_overlay request")
         };

@@ -2,6 +2,10 @@
 
 The release workflow publishes the section for the version being released as that release's notes, and the tuning window shows its first lines in the update banner.
 
+## Unreleased
+
+- Face login camera: the daemon can publish the tracker's infrared picture on a v4l2loopback device, for Howdy. It feeds pictures only while a program reads the device. Not yet tested against a real device.
+
 ## 0.2.2
 
 - The tuning window looks for a newer release every hour while it is open, not only when it opens. A window that was already open when a release came out never showed the Update banner.

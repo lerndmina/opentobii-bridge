@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use crate::steam;
 use crate::{install, prefix, service, update};
+use opentobii_core::camera::Camera;
 use opentobii_core::config::Config;
 use opentobii_core::control::{self, Line, RawPose, Request, Status};
 use opentobii_core::overlay::{self, Overlay, Style};
@@ -89,6 +90,7 @@ enum Command {
     Delete(String),
     Recentre(Option<String>),
     SetOverlay(Box<Overlay>),
+    SetCamera(Camera),
 }
 
 // --- the driver's calibration tool -------------------------------------------
@@ -663,6 +665,30 @@ impl Ui {
         self.refresh_overlay();
     }
 
+    /// Switch the face login camera on or off.
+    fn set_camera(&mut self, on: bool) {
+        self.config.camera.enabled = on;
+        let _ = self
+            .commands
+            .send(Command::SetCamera(self.config.camera.clone()));
+        self.refresh_camera();
+    }
+
+    /// The face login camera card.
+    fn refresh_camera(&self) {
+        let app = &self.app;
+        let camera = &self.config.camera;
+        app.set_camera_enabled(camera.enabled);
+        let status = if !self.connected {
+            "The daemon is not running."
+        } else if self.status.camera.is_empty() {
+            "This daemon is older than the camera: restart it."
+        } else {
+            self.status.camera.as_str()
+        };
+        app.set_camera_status(status.into());
+    }
+
     /// The overlay card, from the settings.
     fn refresh_overlay(&self) {
         let app = &self.app;
@@ -704,6 +730,7 @@ impl Ui {
         self.refresh_checklist();
         self.refresh_service();
         self.refresh_overlay();
+        self.refresh_camera();
         self.refresh_settings();
         self.refresh_live();
     }
@@ -1124,6 +1151,7 @@ impl Ui {
             Event::Status(status) => {
                 self.status = status;
                 self.refresh_chrome();
+                self.refresh_camera();
             }
             Event::Pose(raw) => {
                 if raw.valid {
@@ -1311,6 +1339,7 @@ fn send_commands(commands: Receiver<Command>, events: Sender<Event>) {
             Command::Delete(game) => (Request::DeleteProfile { game }, None),
             Command::Recentre(game) => (Request::Recentre { game: game.clone() }, Some(game)),
             Command::SetOverlay(overlay) => (Request::SetOverlay { overlay: *overlay }, None),
+            Command::SetCamera(camera) => (Request::SetCamera { camera }, None),
         };
         let answer = UnixStream::connect(control::socket_path())
             .map_err(|err| format!("the daemon is not running: {err}"))
@@ -1599,6 +1628,14 @@ pub fn run() -> Result<(), String> {
             ui.commit_overlay(overlay);
         }
     };
+    app.on_camera_toggled({
+        let ui = Rc::clone(&ui);
+        move |on| {
+            if let Ok(mut ui) = ui.try_borrow_mut() {
+                ui.set_camera(on);
+            }
+        }
+    });
     app.on_overlay_toggled({
         let ui = Rc::clone(&ui);
         move |on| {

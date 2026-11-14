@@ -18,5 +18,6 @@ mod recorded;
 pub mod service;
 pub mod steam;
 pub mod update;
+mod v4l2;
 
 pub use daemon::{start, Config, Running};

@@ -440,6 +440,9 @@ fn status() -> CommandResult {
         Some(width) => println!("Display:                   {width:.0} mm wide"),
         None => println!("Display:                   not reported by the driver"),
     }
+    if !status.camera.is_empty() {
+        println!("Face login camera:         {}", status.camera);
+    }
     match &status.settings_path {
         Some(path) => println!("Settings:                  {}", path.display()),
         None => println!("Settings:                  not saved to a file"),

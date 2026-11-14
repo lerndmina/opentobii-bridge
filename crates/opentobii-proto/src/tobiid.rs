@@ -17,11 +17,14 @@ pub const TAG_SUBSCRIBED: u8 = 0x10;
 pub const TAG_REPLY: u8 = 0x11;
 pub const TAG_PRESENCE: u8 = 0x22;
 /// A device notification, such as a changed display area.
+/// One infrared picture from the tracker's camera.
+pub const TAG_IMAGE: u8 = 0x26;
 pub const TAG_NOTIFICATION: u8 = 0x27;
 pub const TAG_GAZE_RAW: u8 = 0x28;
 pub const TAG_HEAD_POSE: u8 = 0x29;
 
 pub const STREAM_PRESENCE: u32 = 1 << 2;
+pub const STREAM_IMAGE: u32 = 1 << 6;
 pub const STREAM_NOTIFICATIONS: u32 = 1 << 7;
 pub const STREAM_GAZE_RAW: u32 = 1 << 8;
 pub const STREAM_HEAD_POSE: u32 = 1 << 9;
@@ -285,6 +288,39 @@ pub fn decode(body: &[u8]) -> Option<ServerMsg> {
     }
 }
 
+/// One infrared picture, borrowed from the message it arrived in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Image<'a> {
+    /// When the picture was taken, `CLOCK_MONOTONIC` microseconds.
+    pub host_micros: i64,
+    pub width: u32,
+    pub height: u32,
+    /// Bits in a pixel; the ET5 sends 8.
+    pub bits: u8,
+    /// Rows from the top, `width * height * bits / 8` bytes.
+    pub pixels: &'a [u8],
+}
+
+/// Read an IMAGE message. [`decode`] leaves these alone: a picture is
+/// large, and only the camera feed wants it.
+#[must_use]
+pub fn image(body: &[u8]) -> Option<Image<'_>> {
+    let (tag, rest) = body.split_first()?;
+    if *tag != TAG_IMAGE {
+        return None;
+    }
+    let mut r = Reader(rest);
+    let image = Image {
+        host_micros: r.i64()?,
+        width: r.u32()?,
+        height: r.u32()?,
+        bits: r.u8()?,
+        pixels: r.0,
+    };
+    let bytes = u64::from(image.width) * u64::from(image.height) * u64::from(image.bits) / 8;
+    (image.pixels.len() as u64 == bytes).then_some(image)
+}
+
 /// Reply payload of `DISPLAY_AREA_GET`: top-left, top-right and bottom-left
 /// corners in the tracker frame, mm.
 #[must_use]
@@ -296,7 +332,7 @@ pub fn display_area(payload: &[u8]) -> Option<[[f32; 3]; 3]> {
 /// Encoders for the daemon's side of the protocol, for tests here and in
 /// the crates that talk to a fake daemon.
 pub mod testing {
-    use super::{GazeRaw, HeadPose, RawEye, TAG_GAZE_RAW, TAG_HEAD_POSE, TAG_PRESENCE};
+    use super::{GazeRaw, HeadPose, RawEye, TAG_GAZE_RAW, TAG_HEAD_POSE, TAG_IMAGE, TAG_PRESENCE};
 
     fn eye(out: &mut Vec<u8>, e: &RawEye) {
         let floats = e
@@ -374,11 +410,37 @@ pub mod testing {
         out.push(status);
         out
     }
+
+    /// An IMAGE message of one byte a pixel.
+    #[must_use]
+    pub fn image_body(host_micros: i64, width: u32, height: u32, pixels: &[u8]) -> Vec<u8> {
+        let mut out = vec![TAG_IMAGE];
+        out.extend_from_slice(&host_micros.to_le_bytes());
+        out.extend_from_slice(&width.to_le_bytes());
+        out.extend_from_slice(&height.to_le_bytes());
+        out.push(8);
+        out.extend_from_slice(pixels);
+        out
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::testing::{gaze_raw_body, head_pose_body, presence_body};
+    use super::testing::{gaze_raw_body, head_pose_body, image_body, presence_body};
+
+    #[test]
+    fn a_picture_is_read_and_a_short_one_refused() {
+        let body = image_body(77, 3, 2, &[1, 2, 3, 4, 5, 6]);
+        let picture = image(&body).expect("a picture");
+        assert_eq!(
+            (picture.host_micros, picture.width, picture.height),
+            (77, 3, 2)
+        );
+        assert_eq!(picture.pixels, [1, 2, 3, 4, 5, 6]);
+        assert!(decode(&body).is_none());
+        assert!(image(&body[..body.len() - 1]).is_none());
+        assert!(image(&presence_body(1, 2)).is_none());
+    }
     use super::*;
 
     fn sample() -> GazeRaw {

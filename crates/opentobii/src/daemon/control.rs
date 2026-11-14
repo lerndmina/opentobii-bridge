@@ -160,6 +160,17 @@ fn handle(shared: &Shared, request: Request, watcher: &Arc<Watcher>) -> Line {
             shared.overlay_changed();
             problem.unwrap_or(Line::Ok)
         }
+        Request::SetCamera { camera } => {
+            if let Err(reason) = camera.validate() {
+                return refuse(reason);
+            }
+            // The camera's own thread sees the change within half a second.
+            state.tuning.camera = camera.clone();
+            let watchers = state.watchers.clone();
+            let problem = apply(shared, state);
+            broadcast_locked(state, &watchers, &Line::Camera(camera));
+            problem.unwrap_or(Line::Ok)
+        }
         Request::Subscribe { poses, gaze } => {
             watcher.poses.store(poses, Ordering::Relaxed);
             watcher.gaze.store(gaze, Ordering::Relaxed);
@@ -253,6 +264,7 @@ fn status(shared: &Shared, state: &State) -> Status {
         display_width_mm: state.display_width_mm,
         games,
         settings_path: shared.config.settings_path.clone(),
+        camera: state.camera_status.clone(),
     }
 }
 

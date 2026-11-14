@@ -429,6 +429,8 @@ export component App inherits Window {
     in-out property <bool> keep-display-setup;
     in property <bool> calibrating;
 
+    in property <bool> camera-enabled;
+    in property <string> camera-status;
     in property <bool> overlay-enabled;
     in property <[string]> overlay-styles;
     in-out property <int> overlay-style-index;
@@ -458,6 +460,7 @@ export component App inherits Window {
     callback service-autostart(bool);
     callback game-action(int);
     callback game-remove(int);
+    callback camera-toggled(bool);
     callback overlay-toggled(bool);
     callback overlay-style-selected(int);
     callback overlay-color-selected(int);
@@ -1065,6 +1068,24 @@ export component App inherits Window {
                             changed(v) => {
                                 root.overlay-trail-changed(v);
                             }
+                        }
+                    }
+
+                    Card {
+                        title: "Face login camera";
+                        hint: "The tracker's infrared picture as a webcam, for Howdy.";
+                        Switch {
+                            text: "Publish the picture while a program reads it";
+                            checked: root.camera-enabled;
+                            toggled => {
+                                root.camera-toggled(self.checked);
+                            }
+                        }
+                        Text {
+                            text: root.camera-status;
+                            color: Theme.muted;
+                            font-size: 12px;
+                            wrap: word-wrap;
                         }
                     }
                 }
