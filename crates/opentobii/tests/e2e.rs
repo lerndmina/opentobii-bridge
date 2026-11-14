@@ -12,12 +12,16 @@ use std::time::{Duration, Instant};
 use opentobii::daemon::{monotonic_micros, start, Config, Running};
 use opentobii_core::smooth::Settings;
 use opentobii_proto::frames::{display_area_corners, keyed_values, Keyed};
+use opentobii_proto::sesp;
 use opentobii_proto::tobiid::testing::{gaze_raw_body, head_pose_body, presence_body};
 use opentobii_proto::tobiid::{self, GazeRaw, HeadPose, RawEye};
 use opentobii_proto::ttp::{self, Message};
-use opentobii_proto::sesp;
 
-const AREA: [[f32; 3]; 3] = [[-300.0, 340.0, 100.0], [300.0, 340.0, 100.0], [-300.0, 5.0, -2.0]];
+const AREA: [[f32; 3]; 3] = [
+    [-300.0, 340.0, 100.0],
+    [300.0, 340.0, 100.0],
+    [-300.0, 5.0, -2.0],
+];
 const QPC: u64 = 5_000_000_000;
 const TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -51,7 +55,9 @@ fn rig(smoothing: Option<Settings>) -> Rig {
         // SUBSCRIBE (4 + 5 bytes) then the display area REQUEST (4 + 6).
         let mut greeting = vec![0u8; 19];
         stream.read_exact(&mut greeting).unwrap();
-        stream.write_all(&tobiid::frame(&[tobiid::TAG_SUBSCRIBED, 1])).unwrap();
+        stream
+            .write_all(&tobiid::frame(&[tobiid::TAG_SUBSCRIBED, 1]))
+            .unwrap();
         let mut reply = vec![tobiid::TAG_REPLY, 1, 0, 0, 0, tobiid::STATUS_OK];
         reply.extend(AREA.iter().flatten().flat_map(|v| v.to_le_bytes()));
         stream.write_all(&tobiid::frame(&reply)).unwrap();
@@ -59,14 +65,31 @@ fn rig(smoothing: Option<Settings>) -> Rig {
     });
 
     let any = SocketAddr::from(([127, 0, 0, 1], 0));
-    let running = start(Config { ttp_addr: any, relay_addr: any, tobiid_socket: socket, smoothing, monitor_index: None }).unwrap();
-    let (driver, greeting) = rx.recv_timeout(TIMEOUT).expect("the daemon connects to the driver");
+    let running = start(Config {
+        ttp_addr: any,
+        relay_addr: any,
+        tobiid_socket: socket,
+        smoothing,
+        monitor_index: None,
+    })
+    .unwrap();
+    let (driver, greeting) = rx
+        .recv_timeout(TIMEOUT)
+        .expect("the daemon connects to the driver");
     let deadline = Instant::now() + TIMEOUT;
     while !running.has_display_area() {
-        assert!(Instant::now() < deadline, "the daemon takes the display area");
+        assert!(
+            Instant::now() < deadline,
+            "the daemon takes the display area"
+        );
         thread::sleep(Duration::from_millis(5));
     }
-    Rig { running, driver, greeting, _dir: TempDir(dir) }
+    Rig {
+        running,
+        driver,
+        greeting,
+        _dir: TempDir(dir),
+    }
 }
 
 fn connect(addr: SocketAddr) -> TcpStream {
@@ -86,7 +109,14 @@ fn read_ttp(stream: &mut TcpStream) -> Message {
 }
 
 fn command(stream: &mut TcpStream, seq: u32, id: u32, payload: Vec<u8>) -> Message {
-    let request = Message { marker: ttp::MARKER_COMMAND, seq, status: 0, id, error: 0, payload };
+    let request = Message {
+        marker: ttp::MARKER_COMMAND,
+        seq,
+        status: 0,
+        id,
+        error: 0,
+        payload,
+    };
     stream.write_all(&request.encode()).unwrap();
     read_ttp(stream)
 }
@@ -145,7 +175,11 @@ fn subscribes_and_asks_for_the_display_area() {
     let rig = rig(None);
     let streams = tobiid::STREAM_GAZE_RAW | tobiid::STREAM_PRESENCE | tobiid::STREAM_HEAD_POSE;
     let mut expected = tobiid::frame(&tobiid::subscribe(streams));
-    expected.extend(tobiid::frame(&tobiid::request(1, tobiid::KIND_DISPLAY_AREA_GET, &[])));
+    expected.extend(tobiid::frame(&tobiid::request(
+        1,
+        tobiid::KIND_DISPLAY_AREA_GET,
+        &[],
+    )));
     assert_eq!(rig.greeting, expected);
 }
 
@@ -154,8 +188,14 @@ fn the_game_is_told_the_drivers_display_area_and_recorded_identity() {
     let rig = rig(None);
     let mut game = connect(rig.running.ttp_addr);
     let area = command(&mut game, 1, 1430, Vec::new());
-    assert_eq!((area.marker, area.seq, area.error), (ttp::MARKER_RESPONSE, 1, 0));
-    assert_eq!(display_area_corners(&area.payload), Some(AREA.map(|c| c.map(f64::from))));
+    assert_eq!(
+        (area.marker, area.seq, area.error),
+        (ttp::MARKER_RESPONSE, 1, 0)
+    );
+    assert_eq!(
+        display_area_corners(&area.payload),
+        Some(AREA.map(|c| c.map(f64::from)))
+    );
 
     let identity = command(&mut game, 2, 1420, Vec::new());
     assert_eq!(identity.error, 0);
@@ -173,15 +213,27 @@ fn live_gaze_and_presence_reach_a_subscribed_game() {
     let mut rig = rig(None);
     let mut game = connect(rig.running.ttp_addr);
     for (seq, stream) in [(1, 0x504u32), (2, 0x500)] {
-        let reply = command(&mut game, seq, 1220, ttp::payload(&[&ttp::u32_item(stream)]));
+        let reply = command(
+            &mut game,
+            seq,
+            1220,
+            ttp::payload(&[&ttp::u32_item(stream)]),
+        );
         assert_eq!(reply.error, 0);
     }
     // The subscription is registered after its reply is written.
     thread::sleep(Duration::from_millis(50));
 
     let host = monotonic_micros();
-    rig.driver.write_all(&tobiid::frame(&presence_body(host, tobiid::PRESENCE_PRESENT))).unwrap();
-    rig.driver.write_all(&tobiid::frame(&gaze_raw_body(&sample(host)))).unwrap();
+    rig.driver
+        .write_all(&tobiid::frame(&presence_body(
+            host,
+            tobiid::PRESENCE_PRESENT,
+        )))
+        .unwrap();
+    rig.driver
+        .write_all(&tobiid::frame(&gaze_raw_body(&sample(host))))
+        .unwrap();
 
     let presence = read_ttp(&mut game);
     assert_eq!((presence.marker, presence.id), (ttp::MARKER_STREAM, 0x504));
@@ -195,35 +247,74 @@ fn live_gaze_and_presence_reach_a_subscribed_game() {
     // No helper has said hello, so the host clock is passed on as it is.
     assert_eq!(values[&0x01], Keyed::Int(host as u64));
     // The eye origin is placed in the display frame of the driver's area.
-    let Keyed::Point(origin) = &values[&0x22] else { panic!("0x22 is a point") };
+    let Keyed::Point(origin) = &values[&0x22] else {
+        panic!("0x22 is a point")
+    };
     assert!((origin[0] - -30.0).abs() < 1e-3, "{origin:?}");
-    assert_eq!(rig.running.stats().gaze_frames.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(
+        rig.running
+            .stats()
+            .gaze_frames
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
 
     // After a stream stop, no more gaze frames.
-    assert_eq!(command(&mut game, 3, 1230, ttp::payload(&[&ttp::u32_item(0x500)])).error, 0);
+    assert_eq!(
+        command(&mut game, 3, 1230, ttp::payload(&[&ttp::u32_item(0x500)])).error,
+        0
+    );
     thread::sleep(Duration::from_millis(50));
-    rig.driver.write_all(&tobiid::frame(&gaze_raw_body(&sample(host)))).unwrap();
-    game.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
-    assert!(game.read(&mut [0u8; 1]).is_err(), "nothing arrives after the stop");
+    rig.driver
+        .write_all(&tobiid::frame(&gaze_raw_body(&sample(host))))
+        .unwrap();
+    game.set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    assert!(
+        game.read(&mut [0u8; 1]).is_err(),
+        "nothing arrives after the stop"
+    );
 }
 
 #[test]
 fn live_head_pose_reaches_the_game_on_the_games_clock() {
     let mut rig = rig(None);
     let mut commands = connect(rig.running.relay_addr);
-    commands.write_all(&helper_hello(sesp::CHANNEL_COMMAND, 1)).unwrap();
+    commands
+        .write_all(&helper_hello(sesp::CHANNEL_COMMAND, 1))
+        .unwrap();
     let mut subscription = connect(rig.running.relay_addr);
-    subscription.write_all(&helper_hello(sesp::CHANNEL_SUBSCRIPTION, 2)).unwrap();
+    subscription
+        .write_all(&helper_hello(sesp::CHANNEL_SUBSCRIPTION, 2))
+        .unwrap();
 
-    commands.write_all(&sesp::frame(&sesp::build(1, sesp::T_DISPLAY_INFO, sesp::Table::new()))).unwrap();
+    commands
+        .write_all(&sesp::frame(&sesp::build(
+            1,
+            sesp::T_DISPLAY_INFO,
+            sesp::Table::new(),
+        )))
+        .unwrap();
     let info = read_sesp(&mut commands);
     let info = sesp::parse(&info).unwrap();
     assert_eq!(info.kind, sesp::T_DISPLAY_INFO_RESPONSE);
-    assert_eq!(info.payload.unwrap().string(1).as_deref(), Some("DISPLAY\\TEST\\1"));
+    assert_eq!(
+        info.payload.unwrap().string(1).as_deref(),
+        Some("DISPLAY\\TEST\\1")
+    );
 
-    commands.write_all(&sesp::frame(&sesp::build(2, sesp::T_HEAD_POSE_START, sesp::Table::new()))).unwrap();
+    commands
+        .write_all(&sesp::frame(&sesp::build(
+            2,
+            sesp::T_HEAD_POSE_START,
+            sesp::Table::new(),
+        )))
+        .unwrap();
     let started = read_sesp(&mut commands);
-    assert_eq!(sesp::parse(&started).unwrap().kind, sesp::T_HEAD_POSE_START_RESPONSE);
+    assert_eq!(
+        sesp::parse(&started).unwrap().kind,
+        sesp::T_HEAD_POSE_START_RESPONSE
+    );
     thread::sleep(Duration::from_millis(50));
 
     let host = monotonic_micros();
@@ -234,8 +325,12 @@ fn live_head_pose_reaches_the_game_on_the_games_clock() {
         rotation_valid: [valid; 3],
         rotation_rad: [0.1, -0.2, 0.05],
     };
-    rig.driver.write_all(&tobiid::frame(&head_pose_body(&pose(false)))).unwrap();
-    rig.driver.write_all(&tobiid::frame(&head_pose_body(&pose(true)))).unwrap();
+    rig.driver
+        .write_all(&tobiid::frame(&head_pose_body(&pose(false))))
+        .unwrap();
+    rig.driver
+        .write_all(&tobiid::frame(&head_pose_body(&pose(true))))
+        .unwrap();
 
     let message = read_sesp(&mut subscription);
     let parsed = sesp::parse(&message).unwrap();
@@ -247,18 +342,36 @@ fn live_head_pose_reaches_the_game_on_the_games_clock() {
     // The helper said the game's counter read QPC when it connected.
     assert!(micros.abs_diff(QPC) < 2_000_000, "{micros}");
     let stats = rig.running.stats();
-    assert_eq!(stats.poses_dropped.load(std::sync::atomic::Ordering::Relaxed), 1);
-    assert_eq!(stats.poses_sent.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(
+        stats
+            .poses_dropped
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        stats.poses_sent.load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
 }
 
 #[test]
 fn smoothing_steadies_a_noisy_pose_before_it_reaches_the_game() {
     let mut rig = rig(Some(Settings::default()));
     let mut commands = connect(rig.running.relay_addr);
-    commands.write_all(&helper_hello(sesp::CHANNEL_COMMAND, 1)).unwrap();
+    commands
+        .write_all(&helper_hello(sesp::CHANNEL_COMMAND, 1))
+        .unwrap();
     let mut subscription = connect(rig.running.relay_addr);
-    subscription.write_all(&helper_hello(sesp::CHANNEL_SUBSCRIPTION, 2)).unwrap();
-    commands.write_all(&sesp::frame(&sesp::build(1, sesp::T_HEAD_POSE_START, sesp::Table::new()))).unwrap();
+    subscription
+        .write_all(&helper_hello(sesp::CHANNEL_SUBSCRIPTION, 2))
+        .unwrap();
+    commands
+        .write_all(&sesp::frame(&sesp::build(
+            1,
+            sesp::T_HEAD_POSE_START,
+            sesp::Table::new(),
+        )))
+        .unwrap();
     read_sesp(&mut commands);
     thread::sleep(Duration::from_millis(50));
 
@@ -275,7 +388,9 @@ fn smoothing_steadies_a_noisy_pose_before_it_reaches_the_game() {
             rotation_valid: [true; 3],
             rotation_rad: [0.0, yaw, 0.0],
         };
-        rig.driver.write_all(&tobiid::frame(&head_pose_body(&pose))).unwrap();
+        rig.driver
+            .write_all(&tobiid::frame(&head_pose_body(&pose)))
+            .unwrap();
         let message = read_sesp(&mut subscription);
         seen.push(sesp::parse(&message).unwrap().payload.unwrap().f32(6, 0.0));
     }
@@ -292,7 +407,11 @@ fn garbage_from_a_client_closes_that_connection_only() {
         header.extend_from_slice(&word.to_be_bytes());
     }
     bad.write_all(&header).unwrap();
-    assert_eq!(bad.read(&mut [0u8; 1]).unwrap_or(0), 0, "an oversized command is hung up on");
+    assert_eq!(
+        bad.read(&mut [0u8; 1]).unwrap_or(0),
+        0,
+        "an oversized command is hung up on"
+    );
 
     let mut bad_helper = connect(rig.running.relay_addr);
     bad_helper.write_all(&[0xAA; 28]).unwrap();

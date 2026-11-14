@@ -52,7 +52,14 @@ pub struct EyeKeys {
 }
 
 impl EyeKeys {
-    const fn new(base: u32, origin_flag: u32, eyeball: u32, point_valid: u32, origin_display_valid: u32, origin_display: u32) -> Self {
+    const fn new(
+        base: u32,
+        origin_flag: u32,
+        eyeball: u32,
+        point_valid: u32,
+        origin_display_valid: u32,
+        origin_display: u32,
+    ) -> Self {
         Self {
             origin_mm: base,
             origin_in_track_box: base + 1,
@@ -98,7 +105,10 @@ pub fn keyed_slots(payload: &[u8]) -> BTreeMap<u32, Vec<Slot>> {
     let mut i = 0;
     while i + 2 < items.len() {
         let (lead, key, value) = (items[i], items[i + 1], items[i + 2]);
-        let is_keyed = lead.typ == TYPE_FIELD_ID && lead.value == key_id && key.typ == TYPE_U32 && key.value.len() == 4;
+        let is_keyed = lead.typ == TYPE_FIELD_ID
+            && lead.value == key_id
+            && key.typ == TYPE_U32
+            && key.value.len() == 4;
         if !is_keyed {
             i += 1;
             continue;
@@ -108,10 +118,25 @@ pub fn keyed_slots(payload: &[u8]) -> BTreeMap<u32, Vec<Slot>> {
             // 0x00021f40 is a 2-D point, 0x00031f41 a 3-D one.
             let count = usize::from(value.value[1]);
             let parts = items.get(i + 3..i + 3 + count).unwrap_or(&[]);
-            slots.insert(key, parts.iter().map(|p| Slot { typ: p.typ, offset: p.offset }).collect());
+            slots.insert(
+                key,
+                parts
+                    .iter()
+                    .map(|p| Slot {
+                        typ: p.typ,
+                        offset: p.offset,
+                    })
+                    .collect(),
+            );
             i += 3 + count;
         } else {
-            slots.insert(key, vec![Slot { typ: value.typ, offset: value.offset }]);
+            slots.insert(
+                key,
+                vec![Slot {
+                    typ: value.typ,
+                    offset: value.offset,
+                }],
+            );
             i += 3;
         }
     }
@@ -121,10 +146,16 @@ pub fn keyed_slots(payload: &[u8]) -> BTreeMap<u32, Vec<Slot>> {
 fn read_slot(payload: &[u8], slot: Slot) -> Option<Keyed> {
     let bytes = payload.get(slot.offset..)?;
     match slot.typ {
-        TYPE_U32 | TYPE_U32_ALT => Some(Keyed::Int(u64::from(u32::from_be_bytes(*bytes.first_chunk()?)))),
+        TYPE_U32 | TYPE_U32_ALT => Some(Keyed::Int(u64::from(u32::from_be_bytes(
+            *bytes.first_chunk()?,
+        )))),
         TYPE_U64 => Some(Keyed::Int(u64::from_be_bytes(*bytes.first_chunk()?))),
-        TYPE_FIXED16 => Some(Keyed::Fixed(f64::from(i32::from_be_bytes(*bytes.first_chunk()?)) / FIXED16_ONE)),
-        TYPE_FIXED32 => Some(Keyed::Fixed(i64::from_be_bytes(*bytes.first_chunk()?) as f64 / POINT_SCALE)),
+        TYPE_FIXED16 => Some(Keyed::Fixed(
+            f64::from(i32::from_be_bytes(*bytes.first_chunk()?)) / FIXED16_ONE,
+        )),
+        TYPE_FIXED32 => Some(Keyed::Fixed(
+            i64::from_be_bytes(*bytes.first_chunk()?) as f64 / POINT_SCALE,
+        )),
         _ => None,
     }
 }
@@ -135,7 +166,10 @@ fn read_slot(payload: &[u8], slot: Slot) -> Option<Keyed> {
 pub fn keyed_values(payload: &[u8]) -> BTreeMap<u32, Keyed> {
     let mut out = BTreeMap::new();
     for (key, slots) in keyed_slots(payload) {
-        let decoded: Vec<Keyed> = slots.iter().filter_map(|slot| read_slot(payload, *slot)).collect();
+        let decoded: Vec<Keyed> = slots
+            .iter()
+            .filter_map(|slot| read_slot(payload, *slot))
+            .collect();
         match decoded.as_slice() {
             [] => {}
             [one] if slots.len() == 1 => {
@@ -180,7 +214,10 @@ impl Template {
     /// Start a copy to write live values into.
     #[must_use]
     pub fn fill(&self) -> Fill<'_> {
-        Fill { out: self.payload.clone(), slots: &self.slots }
+        Fill {
+            out: self.payload.clone(),
+            slots: &self.slots,
+        }
     }
 }
 
@@ -197,12 +234,15 @@ impl Fill<'_> {
     fn slots(&self, key: u32, types: &[u8], count: usize) -> Option<&[Slot]> {
         let found = self.slots.get(&key)?;
         let fits = found.len() == count
-            && found.iter().all(|slot| types.contains(&slot.typ) && slot.offset + width(slot.typ) <= self.out.len());
+            && found.iter().all(|slot| {
+                types.contains(&slot.typ) && slot.offset + width(slot.typ) <= self.out.len()
+            });
         fits.then_some(found.as_slice())
     }
 
     pub fn word(&mut self, key: u32, value: Option<u32>) {
-        let (Some(value), Some(&[slot])) = (value, self.slots(key, &[TYPE_U32, TYPE_U32_ALT], 1)) else {
+        let (Some(value), Some(&[slot])) = (value, self.slots(key, &[TYPE_U32, TYPE_U32_ALT], 1))
+        else {
             return;
         };
         self.out[slot.offset..slot.offset + 4].copy_from_slice(&value.to_be_bytes());
@@ -229,7 +269,10 @@ impl Fill<'_> {
         if !values.iter().all(|v| v.is_finite()) {
             return;
         }
-        let Some(found) = self.slots(key, &[TYPE_FIXED32], values.len()).map(<[Slot]>::to_vec) else {
+        let Some(found) = self
+            .slots(key, &[TYPE_FIXED32], values.len())
+            .map(<[Slot]>::to_vec)
+        else {
             return;
         };
         for (slot, value) in found.iter().zip(values) {
@@ -269,7 +312,11 @@ impl DisplayFrame {
         let centre = [0, 1, 2].map(|i| (top_right[i] + bottom_left[i]) / 2.0);
         let x = unit(sub(top_right, top_left))?;
         let y = unit(sub(top_left, bottom_left))?;
-        let z = [x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]];
+        let z = [
+            x[1] * y[2] - x[2] * y[1],
+            x[2] * y[0] - x[0] * y[2],
+            x[0] * y[1] - x[1] * y[0],
+        ];
         Some(Self { centre, x, y, z })
     }
 
@@ -298,10 +345,20 @@ fn wide<const N: usize>(values: [f32; N]) -> [f64; N] {
     values.map(f64::from)
 }
 
-fn eye(fill: &mut Fill<'_>, keys: &EyeKeys, eye: &RawEye, origin_flag: Option<u32>, eyeball: Option<[f32; 3]>, display: Option<&DisplayFrame>) {
+fn eye(
+    fill: &mut Fill<'_>,
+    keys: &EyeKeys,
+    eye: &RawEye,
+    origin_flag: Option<u32>,
+    eyeball: Option<[f32; 3]>,
+    display: Option<&DisplayFrame>,
+) {
     let tracked = eye.status == 0;
     fill.point(keys.origin_mm, &wide(eye.gaze_origin_mm));
-    fill.point(keys.origin_in_track_box, &wide(eye.gaze_origin_in_track_box));
+    fill.point(
+        keys.origin_in_track_box,
+        &wide(eye.gaze_origin_in_track_box),
+    );
     fill.point(keys.gaze_point_mm, &wide(eye.gaze_point_mm));
     fill.point(keys.gaze_point_on_display, &wide(eye.gaze_point_on_display));
     fill.fixed16(keys.pupil, f64::from(eye.pupil_diameter_mm));
@@ -315,7 +372,10 @@ fn eye(fill: &mut Fill<'_>, keys: &EyeKeys, eye: &RawEye, origin_flag: Option<u3
     fill.word(keys.point_valid, Some(u32::from(tracked)));
     let mut origin_valid = origin_flag.map_or(tracked, |flag| flag != 0);
     match display {
-        Some(display) => fill.point(keys.origin_display, &display.from_tracker(wide(eye.gaze_origin_mm))),
+        Some(display) => fill.point(
+            keys.origin_display,
+            &display.from_tracker(wide(eye.gaze_origin_mm)),
+        ),
         // Without a display area the recorded display-frame origin would be
         // someone else's: mark it invalid rather than pass it on.
         None => origin_valid = false,
@@ -329,15 +389,34 @@ fn eye(fill: &mut Fill<'_>, keys: &EyeKeys, eye: &RawEye, origin_flag: Option<u3
 /// position guide (0x25..0x28) and the fields an Eye Tracker 5 never fills
 /// (0x19, 0x1a, 0x29..0x2c).
 #[must_use]
-pub fn gaze_frame(template: &Template, raw: &GazeRaw, micros: u64, display: Option<&DisplayFrame>) -> Vec<u8> {
+pub fn gaze_frame(
+    template: &Template,
+    raw: &GazeRaw,
+    micros: u64,
+    display: Option<&DisplayFrame>,
+) -> Vec<u8> {
     let mut fill = template.fill();
     fill.u64(KEY_TIMESTAMP, micros);
     fill.word(0x11, raw.key_11);
     fill.word(KEY_FRAME_COUNTER, raw.frame_counter);
     fill.word(KEY_COMBINED_VALID, Some(raw.combined_validity));
     fill.point(KEY_COMBINED, &wide(raw.combined_on_display));
-    eye(&mut fill, &LEFT, &raw.left, raw.left_origin_flag, raw.left_eyeball_center_mm, display);
-    eye(&mut fill, &RIGHT, &raw.right, raw.right_origin_flag, raw.right_eyeball_center_mm, display);
+    eye(
+        &mut fill,
+        &LEFT,
+        &raw.left,
+        raw.left_origin_flag,
+        raw.left_eyeball_center_mm,
+        display,
+    );
+    eye(
+        &mut fill,
+        &RIGHT,
+        &raw.right,
+        raw.right_origin_flag,
+        raw.right_eyeball_center_mm,
+        display,
+    );
     match raw.responsive_on_display {
         Some(point) => {
             fill.word(KEY_RESPONSIVE_VALID, Some(raw.responsive_validity));
@@ -387,7 +466,9 @@ pub fn display_area_reply(template: &[u8], corners: [[f64; 3]; 3]) -> Option<Vec
 pub fn display_area_corners(reply: &[u8]) -> Option<[[f64; 3]; 3]> {
     let values: Vec<f64> = corner_offsets(reply)
         .iter()
-        .filter_map(|at| Some(i64::from_be_bytes(*reply.get(*at..)?.first_chunk()?) as f64 / POINT_SCALE))
+        .filter_map(|at| {
+            Some(i64::from_be_bytes(*reply.get(*at..)?.first_chunk()?) as f64 / POINT_SCALE)
+        })
         .collect();
     let corner = |i: usize| Some([*values.get(i)?, *values.get(i + 1)?, *values.get(i + 2)?]);
     Some([corner(0)?, corner(3)?, corner(6)?])
@@ -397,7 +478,7 @@ pub fn display_area_corners(reply: &[u8]) -> Option<[[f64; 3]; 3]> {
 mod tests {
     use super::*;
     use crate::fixtures::load;
-    use crate::tobiid::{PRESENCE_AWAY, RawEye};
+    use crate::tobiid::{RawEye, PRESENCE_AWAY};
 
     fn gaze() -> Vec<u8> {
         load("session1-gaze-frame").payload
@@ -495,7 +576,12 @@ mod tests {
     #[test]
     fn refilling_the_recording_with_its_own_values_reproduces_it() {
         let template = Template::new(gaze());
-        let rebuilt = gaze_frame(&template, &raw_from(&gaze()), 9_613_320_391, Some(&display()));
+        let rebuilt = gaze_frame(
+            &template,
+            &raw_from(&gaze()),
+            9_613_320_391,
+            Some(&display()),
+        );
         assert_eq!(rebuilt.len(), gaze().len());
         let (before, after) = (keyed_values(&gaze()), keyed_values(&rebuilt));
         for (key, was) in &before {
@@ -503,7 +589,9 @@ mod tests {
                 (Keyed::Int(a), Keyed::Int(b)) => assert_eq!(a, b, "{key:#x}"),
                 // Through f32 and back: a few parts in ten million.
                 (Keyed::Fixed(a), Keyed::Fixed(b)) => assert!((a - b).abs() < 1e-5, "{key:#x}"),
-                (Keyed::Point(a), Keyed::Point(b)) => assert!(close(a, b, 1e-3), "{key:#x}: {a:?} {b:?}"),
+                (Keyed::Point(a), Keyed::Point(b)) => {
+                    assert!(close(a, b, 1e-3), "{key:#x}: {a:?} {b:?}")
+                }
                 (a, b) => panic!("{key:#x} changed type: {a:?} {b:?}"),
             }
         }
@@ -519,8 +607,19 @@ mod tests {
             pupil_diameter_mm: 3.5,
             status: 4,
         };
-        let raw = GazeRaw { left, combined_on_display: [0.125, 0.875], combined_validity: 0, frame_counter: Some(7), ..raw_from(&gaze()) };
-        let v = keyed_values(&gaze_frame(&Template::new(gaze()), &raw, 123_456_789, Some(&display())));
+        let raw = GazeRaw {
+            left,
+            combined_on_display: [0.125, 0.875],
+            combined_validity: 0,
+            frame_counter: Some(7),
+            ..raw_from(&gaze())
+        };
+        let v = keyed_values(&gaze_frame(
+            &Template::new(gaze()),
+            &raw,
+            123_456_789,
+            Some(&display()),
+        ));
         assert_eq!(int(&v, 0x01), 123_456_789);
         assert_eq!(point(&v, 0x02), [1.0, 2.0, 600.0]);
         assert_eq!(point(&v, 0x05), [0.25, 0.75]);
@@ -535,21 +634,42 @@ mod tests {
 
     #[test]
     fn without_a_display_area_the_display_frame_origin_is_marked_invalid() {
-        let v = keyed_values(&gaze_frame(&Template::new(gaze()), &raw_from(&gaze()), 1, None));
+        let v = keyed_values(&gaze_frame(
+            &Template::new(gaze()),
+            &raw_from(&gaze()),
+            1,
+            None,
+        ));
         assert_eq!((int(&v, 0x21), int(&v, 0x23)), (0, 0));
     }
 
     #[test]
     fn a_missing_responsive_point_is_marked_invalid() {
-        let raw = GazeRaw { responsive_on_display: None, ..raw_from(&gaze()) };
-        let v = keyed_values(&gaze_frame(&Template::new(gaze()), &raw, 1, Some(&display())));
+        let raw = GazeRaw {
+            responsive_on_display: None,
+            ..raw_from(&gaze())
+        };
+        let v = keyed_values(&gaze_frame(
+            &Template::new(gaze()),
+            &raw,
+            1,
+            Some(&display()),
+        ));
         assert_eq!(int(&v, 0x1F), 0);
     }
 
     #[test]
     fn not_a_number_never_reaches_the_frame() {
-        let raw = GazeRaw { combined_on_display: [f32::NAN, f32::INFINITY], ..raw_from(&gaze()) };
-        let v = keyed_values(&gaze_frame(&Template::new(gaze()), &raw, 1, Some(&display())));
+        let raw = GazeRaw {
+            combined_on_display: [f32::NAN, f32::INFINITY],
+            ..raw_from(&gaze())
+        };
+        let v = keyed_values(&gaze_frame(
+            &Template::new(gaze()),
+            &raw,
+            1,
+            Some(&display()),
+        ));
         assert_eq!(point(&v, 0x1C), point(&keyed_values(&gaze()), 0x1C));
     }
 
@@ -557,13 +677,21 @@ mod tests {
     fn away_from_the_present_template_matches_the_recorded_away_frame() {
         let away = load("session2-presence-away").payload;
         let micros = int(&keyed_values(&away), 1);
-        let rebuilt = presence_frame(&Template::new(load("init-presence").payload), PRESENCE_AWAY, micros);
+        let rebuilt = presence_frame(
+            &Template::new(load("init-presence").payload),
+            PRESENCE_AWAY,
+            micros,
+        );
         assert_eq!(rebuilt, away);
     }
 
     #[test]
     fn display_area_round_trip() {
-        let corners = [[-300.0, 340.0, 100.0], [300.0, 340.0, 100.0], [-300.0, 5.0, -2.0]];
+        let corners = [
+            [-300.0, 340.0, 100.0],
+            [300.0, 340.0, 100.0],
+            [-300.0, 5.0, -2.0],
+        ];
         let reply = display_area_reply(&area(), corners).unwrap();
         assert_eq!(reply.len(), area().len());
         assert_eq!(display_area_corners(&reply), Some(corners));
@@ -575,10 +703,18 @@ mod tests {
 
     #[test]
     fn display_frame_axes() {
-        let d = DisplayFrame::new([-300.0, 340.0, 0.0], [300.0, 340.0, 0.0], [-300.0, 0.0, 0.0]).unwrap();
+        let d = DisplayFrame::new(
+            [-300.0, 340.0, 0.0],
+            [300.0, 340.0, 0.0],
+            [-300.0, 0.0, 0.0],
+        )
+        .unwrap();
         assert_eq!(d.from_tracker([0.0, 170.0, 0.0]), [0.0, 0.0, 0.0]);
         assert_eq!(d.from_tracker([10.0, 180.0, 600.0]), [10.0, 10.0, 600.0]);
-        assert_eq!(DisplayFrame::new([0.0; 3], [0.0; 3], [0.0, -1.0, 0.0]), None);
+        assert_eq!(
+            DisplayFrame::new([0.0; 3], [0.0; 3], [0.0, -1.0, 0.0]),
+            None
+        );
     }
 
     #[test]
@@ -586,7 +722,12 @@ mod tests {
         let full = gaze();
         let raw = raw_from(&full);
         for cut in (0..full.len()).step_by(7) {
-            let _ = gaze_frame(&Template::new(full[..cut].to_vec()), &raw, 1, Some(&display()));
+            let _ = gaze_frame(
+                &Template::new(full[..cut].to_vec()),
+                &raw,
+                1,
+                Some(&display()),
+            );
         }
     }
 }

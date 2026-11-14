@@ -25,9 +25,15 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Config, String> {
             "--no-smooth" => config.smoothing = None,
             "--monitor" => {
                 let value = args.next().ok_or("--monitor needs a number")?;
-                config.monitor_index = Some(value.parse().map_err(|_| format!("--monitor: `{value}` is not a number"))?);
+                config.monitor_index = Some(
+                    value
+                        .parse()
+                        .map_err(|_| format!("--monitor: `{value}` is not a number"))?,
+                );
             }
-            "--socket" => config.tobiid_socket = PathBuf::from(args.next().ok_or("--socket needs a path")?),
+            "--socket" => {
+                config.tobiid_socket = PathBuf::from(args.next().ok_or("--socket needs a path")?)
+            }
             other => return Err(format!("unknown argument `{other}`")),
         }
     }
@@ -44,7 +50,10 @@ fn main() -> ExitCode {
     };
     match start(config) {
         Ok(running) => {
-            eprintln!("opentobii: TTP on {}, helper relay on {}", running.ttp_addr, running.relay_addr);
+            eprintln!(
+                "opentobii: TTP on {}, helper relay on {}",
+                running.ttp_addr, running.relay_addr
+            );
             loop {
                 thread::park();
             }

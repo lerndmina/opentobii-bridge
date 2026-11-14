@@ -47,7 +47,13 @@ impl OneEuro {
     /// closely.
     pub fn new(min_cutoff: f64, beta: f64) -> Result<Self, BadSettings> {
         let ok = min_cutoff.is_finite() && min_cutoff > 0.0 && beta.is_finite() && beta >= 0.0;
-        ok.then_some(Self { min_cutoff, beta, derivative_cutoff: 1.0, state: None }).ok_or(BadSettings)
+        ok.then_some(Self {
+            min_cutoff,
+            beta,
+            derivative_cutoff: 1.0,
+            state: None,
+        })
+        .ok_or(BadSettings)
     }
 
     /// Forget the past: the next sample passes through as it is.
@@ -61,7 +67,11 @@ impl OneEuro {
             // Never let a bad sample into the state.
             return self.state.map_or(value, |s| s.value);
         }
-        let restart = State { value, speed: 0.0, time: seconds };
+        let restart = State {
+            value,
+            speed: 0.0,
+            time: seconds,
+        };
         let Some(prev) = self.state else {
             self.state = Some(restart);
             return value;
@@ -76,7 +86,11 @@ impl OneEuro {
         let speed = prev.speed + alpha(self.derivative_cutoff, dt) * (raw_speed - prev.speed);
         let cutoff = self.min_cutoff + self.beta * speed.abs();
         let filtered = prev.value + alpha(cutoff, dt) * (value - prev.value);
-        self.state = Some(State { value: filtered, speed, time: seconds });
+        self.state = Some(State {
+            value: filtered,
+            speed,
+            time: seconds,
+        });
         filtered
     }
 }
@@ -95,7 +109,12 @@ pub struct Settings {
 impl Default for Settings {
     /// The values tuned against a real Eye Tracker 5 in ETS2 on 2026-11-14.
     fn default() -> Self {
-        Self { rotation_min_cutoff: 0.8, rotation_beta: 0.1, position_min_cutoff: 0.8, position_beta: 0.02 }
+        Self {
+            rotation_min_cutoff: 0.8,
+            rotation_beta: 0.1,
+            position_min_cutoff: 0.8,
+            position_beta: 0.02,
+        }
     }
 }
 
@@ -110,7 +129,10 @@ impl PoseFilter {
     pub fn new(settings: Settings) -> Result<Self, BadSettings> {
         let position = OneEuro::new(settings.position_min_cutoff, settings.position_beta)?;
         let rotation = OneEuro::new(settings.rotation_min_cutoff, settings.rotation_beta)?;
-        Ok(Self { position: [position; 3], rotation: [rotation; 3] })
+        Ok(Self {
+            position: [position; 3],
+            rotation: [rotation; 3],
+        })
     }
 
     pub fn reset(&mut self) {
@@ -121,7 +143,12 @@ impl PoseFilter {
 
     /// Filter one pose taken at `micros`. Returns position in mm and
     /// rotation in radians.
-    pub fn filter(&mut self, micros: i64, position_mm: [f32; 3], rotation_rad: [f32; 3]) -> ([f32; 3], [f32; 3]) {
+    pub fn filter(
+        &mut self,
+        micros: i64,
+        position_mm: [f32; 3],
+        rotation_rad: [f32; 3],
+    ) -> ([f32; 3], [f32; 3]) {
         let seconds = micros as f64 / 1e6;
         let mut position = [0.0; 3];
         let mut rotation = [0.0; 3];
@@ -147,7 +174,10 @@ mod tests {
 
     impl Noise {
         fn uniform(&mut self) -> f64 {
-            self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
             (self.0 >> 11) as f64 / (1u64 << 53) as f64
         }
         fn gauss(&mut self, sd: f64) -> f64 {
@@ -175,7 +205,11 @@ mod tests {
         let mut noise = Noise(1);
         let mut f = OneEuro::new(0.8, 0.1).unwrap();
         let raw: Vec<f64> = (0..600).map(|_| 10.0 + noise.gauss(0.14)).collect();
-        let out: Vec<f64> = raw.iter().enumerate().map(|(i, v)| f.filter(*v, i as f64 * DT)).collect();
+        let out: Vec<f64> = raw
+            .iter()
+            .enumerate()
+            .map(|(i, v)| f.filter(*v, i as f64 * DT))
+            .collect();
         assert!(spread(&out[100..]) < spread(&raw[100..]) / 2.5);
         assert!((mean(&out[100..]) - 10.0).abs() < 0.05);
     }
@@ -207,7 +241,11 @@ mod tests {
         f.filter(3.0, 0.0);
         assert_eq!(f.filter(f64::NAN, DT), 3.0);
         assert!((f.filter(3.0, 2.0 * DT) - 3.0).abs() < 1e-12);
-        assert_eq!(f.filter(3.0, f64::NAN), 3.0, "a bad time restarts, it does not spread");
+        assert_eq!(
+            f.filter(3.0, f64::NAN),
+            3.0,
+            "a bad time restarts, it does not spread"
+        );
     }
 
     #[test]
@@ -215,7 +253,11 @@ mod tests {
         assert_eq!(OneEuro::new(0.0, 0.1), Err(BadSettings));
         assert_eq!(OneEuro::new(1.0, -1.0), Err(BadSettings));
         assert_eq!(OneEuro::new(f64::NAN, 0.1), Err(BadSettings));
-        assert!(PoseFilter::new(Settings { rotation_min_cutoff: 0.0, ..Settings::default() }).is_err());
+        assert!(PoseFilter::new(Settings {
+            rotation_min_cutoff: 0.0,
+            ..Settings::default()
+        })
+        .is_err());
     }
 
     #[test]
@@ -225,7 +267,11 @@ mod tests {
         let mut yaw = Vec::new();
         for i in 0..400 {
             let noisy = (5.0 + noise.gauss(0.14)).to_radians() as f32;
-            let (_, rotation) = f.filter((f64::from(i) * DT * 1e6) as i64, [0.0, 0.0, 800.0], [0.0, noisy, 0.0]);
+            let (_, rotation) = f.filter(
+                (f64::from(i) * DT * 1e6) as i64,
+                [0.0, 0.0, 800.0],
+                [0.0, noisy, 0.0],
+            );
             yaw.push(f64::from(rotation[1]).to_degrees());
         }
         assert!((mean(&yaw[100..]) - 5.0).abs() < 0.05);
@@ -237,7 +283,11 @@ mod tests {
         let mut f = PoseFilter::new(Settings::default()).unwrap();
         let mut position = [0.0; 3];
         for i in 0..200 {
-            (position, _) = f.filter((f64::from(i) * DT * 1e6) as i64, [-10.0, 20.0, 800.0], [0.0; 3]);
+            (position, _) = f.filter(
+                (f64::from(i) * DT * 1e6) as i64,
+                [-10.0, 20.0, 800.0],
+                [0.0; 3],
+            );
         }
         assert_eq!(position, [-10.0, 20.0, 800.0]);
         f.reset();

@@ -119,7 +119,10 @@ impl Message {
         let want = header.payload_len as usize;
         let body = &buf[HEADER_LEN..];
         if body.len() < want {
-            return Err(Error::TruncatedPayload { want, have: body.len() });
+            return Err(Error::TruncatedPayload {
+                want,
+                have: body.len(),
+            });
         }
         Ok(Self {
             marker: header.marker,
@@ -168,7 +171,14 @@ impl Message {
     /// A stream message carrying `payload` for stream `id`.
     #[must_use]
     pub fn stream(id: u32, payload: Vec<u8>) -> Self {
-        Self { marker: MARKER_STREAM, seq: 0, status: 0, id, error: ERROR_NONE, payload }
+        Self {
+            marker: MARKER_STREAM,
+            seq: 0,
+            status: 0,
+            id,
+            error: ERROR_NONE,
+            payload,
+        }
     }
 }
 
@@ -186,7 +196,11 @@ pub struct Item<'a> {
 #[must_use]
 pub fn items(payload: &[u8]) -> Items<'_> {
     // Every payload opens with two zero bytes.
-    Items { payload, pos: 2, failed: false }
+    Items {
+        payload,
+        pos: 2,
+        failed: false,
+    }
 }
 
 /// Iterator returned by [`items`].
@@ -208,12 +222,19 @@ impl<'a> Iterator for Items<'a> {
         let typ = self.payload[at];
         let length = be_u32(&self.payload[at + 1..]) as usize;
         let start = at + 5;
-        let Some(end) = start.checked_add(length).filter(|end| *end <= self.payload.len()) else {
+        let Some(end) = start
+            .checked_add(length)
+            .filter(|end| *end <= self.payload.len())
+        else {
             self.failed = true;
             return Some(Err(Error::TruncatedItem { at }));
         };
         self.pos = end;
-        Some(Ok(Item { typ, offset: start, value: &self.payload[start..end] }))
+        Some(Ok(Item {
+            typ,
+            offset: start,
+            value: &self.payload[start..end],
+        }))
     }
 }
 
@@ -264,7 +285,9 @@ pub fn timestamp_offset(body: &[u8]) -> Option<usize> {
     lead.extend_from_slice(&u32_item(1));
     lead.push(TYPE_U64);
     lead.extend_from_slice(&8u32.to_be_bytes());
-    let at = body.windows(lead.len()).position(|window| window == lead.as_slice())?;
+    let at = body
+        .windows(lead.len())
+        .position(|window| window == lead.as_slice())?;
     let value = at + lead.len();
     (value + 8 <= body.len()).then_some(value)
 }
@@ -285,7 +308,7 @@ fn be_u32(bytes: &[u8]) -> u32 {
 }
 
 fn decode_hex(text: &str) -> Option<Vec<u8>> {
-    if text.len() % 2 != 0 || !text.is_ascii() {
+    if !text.len().is_multiple_of(2) || !text.is_ascii() {
         return None;
     }
     text.as_bytes()
@@ -337,12 +360,17 @@ mod tests {
             Message::decode(&raw[..raw.len() - 1]),
             Err(Error::TruncatedPayload { want: 47, have: 46 })
         );
-        assert_eq!(Message::decode(&raw[..10]), Err(Error::ShortHeader { have: 10 }));
+        assert_eq!(
+            Message::decode(&raw[..10]),
+            Err(Error::ShortHeader { have: 10 })
+        );
     }
 
     #[test]
     fn response_copies_seq_and_command() {
-        let reply = Message::decode(&upgrade_request()).unwrap().response(Vec::new(), ERROR_UNSUPPORTED);
+        let reply = Message::decode(&upgrade_request())
+            .unwrap()
+            .response(Vec::new(), ERROR_UNSUPPORTED);
         assert_eq!(
             (reply.marker, reply.seq, reply.status, reply.id, reply.error),
             (MARKER_RESPONSE, 1, STATUS_OK, 1000, ERROR_UNSUPPORTED)
@@ -411,9 +439,18 @@ mod tests {
     #[test]
     fn every_recorded_message_decodes() {
         for name in [
-            "init-rsp-1000", "init-rsp-1200", "init-rsp-1330", "init-rsp-1400", "init-rsp-1420",
-            "init-rsp-1430", "init-rsp-1490", "init-rsp-1650", "init-rsp-2110", "init-presence",
-            "session1-gaze-frame", "session2-presence-away",
+            "init-rsp-1000",
+            "init-rsp-1200",
+            "init-rsp-1330",
+            "init-rsp-1400",
+            "init-rsp-1420",
+            "init-rsp-1430",
+            "init-rsp-1490",
+            "init-rsp-1650",
+            "init-rsp-2110",
+            "init-presence",
+            "session1-gaze-frame",
+            "session2-presence-away",
         ] {
             let msg = load(name);
             assert!(items(&msg.payload).all(|item| item.is_ok()), "{name}");

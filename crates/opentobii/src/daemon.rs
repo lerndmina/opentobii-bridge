@@ -30,8 +30,13 @@ const STREAM_GAZE: u32 = 0x500;
 const STREAM_PRESENCE: u32 = 0x504;
 
 const AREA_REQUEST_ID: u32 = 1;
-const DRIVER_STREAMS: u32 = driver::STREAM_GAZE_RAW | driver::STREAM_PRESENCE | driver::STREAM_HEAD_POSE;
-const CAPABILITIES: [u16; 3] = [sesp::CAP_HEAD_POSE, sesp::CAP_DISPLAY_INFO, sesp::CAP_STREAM_STATUS];
+const DRIVER_STREAMS: u32 =
+    driver::STREAM_GAZE_RAW | driver::STREAM_PRESENCE | driver::STREAM_HEAD_POSE;
+const CAPABILITIES: [u16; 3] = [
+    sesp::CAP_HEAD_POSE,
+    sesp::CAP_DISPLAY_INFO,
+    sesp::CAP_STREAM_STATUS,
+];
 
 /// Largest TTP payload a game may send. Its real commands are under 100
 /// bytes.
@@ -108,12 +113,18 @@ struct Conn {
 impl Conn {
     /// Write one whole frame. An error means the peer is gone or stuck.
     fn send(&self, bytes: &[u8]) -> io::Result<()> {
-        let mut stream = self.stream.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut stream = self
+            .stream
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         stream.write_all(bytes)
     }
 
     fn close(&self) {
-        let stream = self.stream.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let stream = self
+            .stream
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _ = stream.shutdown(Shutdown::Both);
     }
 }
@@ -152,7 +163,9 @@ struct Shared {
 impl Shared {
     fn lock(&self) -> MutexGuard<'_, State> {
         // A panic in one connection thread must not take the daemon down.
-        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn log(&self, text: &str) {
@@ -163,7 +176,10 @@ impl Shared {
         let writer = stream.try_clone()?;
         writer.set_write_timeout(Some(WRITE_TIMEOUT))?;
         writer.set_nodelay(true)?;
-        Ok(Arc::new(Conn { id: self.next_conn.fetch_add(1, Ordering::Relaxed), stream: Mutex::new(writer) }))
+        Ok(Arc::new(Conn {
+            id: self.next_conn.fetch_add(1, Ordering::Relaxed),
+            stream: Mutex::new(writer),
+        }))
     }
 
     /// A `tobiid` host time on the clock the game reads.
@@ -199,7 +215,9 @@ impl Shared {
 #[must_use]
 pub fn monotonic_micros() -> i64 {
     let now = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
-    now.tv_sec.saturating_mul(1_000_000).saturating_add(now.tv_nsec / 1_000)
+    now.tv_sec
+        .saturating_mul(1_000_000)
+        .saturating_add(now.tv_nsec / 1_000)
 }
 
 /// Bind both listeners and start the threads. Returns once the daemon is
@@ -207,12 +225,13 @@ pub fn monotonic_micros() -> i64 {
 pub fn start(config: Config) -> io::Result<Running> {
     let ttp_listener = TcpListener::bind(config.ttp_addr)?;
     let relay_listener = TcpListener::bind(config.relay_addr)?;
-    let filter = match config.smoothing {
-        Some(settings) => Some(
-            PoseFilter::new(settings).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "bad smoothing settings"))?,
-        ),
-        None => None,
-    };
+    let filter =
+        match config.smoothing {
+            Some(settings) => Some(PoseFilter::new(settings).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "bad smoothing settings")
+            })?),
+            None => None,
+        };
     let shared = Arc::new(Shared {
         state: Mutex::new(State {
             clock_offset: None,
@@ -241,8 +260,12 @@ pub fn start(config: Config) -> io::Result<Running> {
         shared: Arc::clone(&shared),
     };
 
-    spawn("ttp-accept", Arc::clone(&shared), move |shared| accept(&ttp_listener, shared, "ttp", serve_game));
-    spawn("relay-accept", Arc::clone(&shared), move |shared| accept(&relay_listener, shared, "relay", serve_helper));
+    spawn("ttp-accept", Arc::clone(&shared), move |shared| {
+        accept(&ttp_listener, shared, "ttp", serve_game)
+    });
+    spawn("relay-accept", Arc::clone(&shared), move |shared| {
+        accept(&relay_listener, shared, "relay", serve_helper)
+    });
     spawn("tobiid", shared, follow_driver);
     Ok(running)
 }
@@ -257,7 +280,12 @@ fn spawn(name: &str, shared: Arc<Shared>, body: impl FnOnce(Arc<Shared>) + Send 
     }
 }
 
-fn accept(listener: &TcpListener, shared: Arc<Shared>, name: &'static str, serve: fn(&Shared, TcpStream) -> io::Result<()>) {
+fn accept(
+    listener: &TcpListener,
+    shared: Arc<Shared>,
+    name: &'static str,
+    serve: fn(&Shared, TcpStream) -> io::Result<()>,
+) {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => spawn(name, Arc::clone(&shared), move |shared| {
@@ -305,7 +333,10 @@ fn game_loop(shared: &Shared, stream: &mut TcpStream, conn: &Arc<Conn>) -> io::R
         };
         let reply = answer(shared, &request);
         if reply.error != ttp::ERROR_NONE {
-            shared.log(&format!("ttp: command {} refused ({:#x})", request.id, reply.error));
+            shared.log(&format!(
+                "ttp: command {} refused ({:#x})",
+                request.id, reply.error
+            ));
         }
         conn.send(&reply.encode())?;
         after_reply(shared, &request, conn);
@@ -357,8 +388,12 @@ fn after_reply(shared: &Shared, request: &Message, conn: &Arc<Conn>) {
                 let _ = conn.send(&Message::stream(STREAM_PRESENCE, payload).encode());
             }
         }
-        (CMD_STREAM_STOP, Some(STREAM_GAZE)) => shared.lock().gaze_sinks.retain(|c| c.id != conn.id),
-        (CMD_STREAM_STOP, Some(STREAM_PRESENCE)) => shared.lock().presence_sinks.retain(|c| c.id != conn.id),
+        (CMD_STREAM_STOP, Some(STREAM_GAZE)) => {
+            shared.lock().gaze_sinks.retain(|c| c.id != conn.id)
+        }
+        (CMD_STREAM_STOP, Some(STREAM_PRESENCE)) => {
+            shared.lock().presence_sinks.retain(|c| c.id != conn.id)
+        }
         _ => {}
     }
 }
@@ -379,7 +414,8 @@ fn read_hello(stream: &mut TcpStream) -> io::Result<Hello> {
     if &fixed[..4] != b"OTB1" {
         return Err(invalid("not a helper hello"));
     }
-    let word = |at: usize| u32::from_le_bytes([fixed[at], fixed[at + 1], fixed[at + 2], fixed[at + 3]]);
+    let word =
+        |at: usize| u32::from_le_bytes([fixed[at], fixed[at + 1], fixed[at + 2], fixed[at + 3]]);
     let counter = u64::from_le_bytes(fixed[16..24].try_into().expect("eight bytes"));
     let count = word(24);
     if count > MAX_MONITORS {
@@ -393,13 +429,21 @@ fn read_hello(stream: &mut TcpStream) -> io::Result<Hello> {
         stream.read_exact(&mut name)?;
         monitors.push((head[0] != 0, String::from_utf8_lossy(&name).into_owned()));
     }
-    Ok(Hello { channel: word(4), pid: word(8), slot: word(12), counter, monitors })
+    Ok(Hello {
+        channel: word(4),
+        pid: word(8),
+        slot: word(12),
+        counter,
+        monitors,
+    })
 }
 
 fn serve_helper(shared: &Shared, mut stream: TcpStream) -> io::Result<()> {
     let hello = read_hello(&mut stream)?;
     let conn = shared.conn(&stream)?;
-    let offset = i64::try_from(hello.counter).unwrap_or(i64::MAX).saturating_sub(monotonic_micros());
+    let offset = i64::try_from(hello.counter)
+        .unwrap_or(i64::MAX)
+        .saturating_sub(monotonic_micros());
     let chosen = shared
         .config
         .monitor_index
@@ -419,7 +463,10 @@ fn serve_helper(shared: &Shared, mut stream: TcpStream) -> io::Result<()> {
     }
 
     if hello.channel == sesp::CHANNEL_SUBSCRIPTION {
-        shared.lock().pose_sinks.insert(hello.pid, Arc::clone(&conn));
+        shared
+            .lock()
+            .pose_sinks
+            .insert(hello.pid, Arc::clone(&conn));
         // Nothing is expected on this channel; read until the game closes it.
         let mut sink = [0u8; 256];
         while stream.read(&mut sink)? != 0 {}
@@ -427,7 +474,10 @@ fn serve_helper(shared: &Shared, mut stream: TcpStream) -> io::Result<()> {
         return Ok(());
     }
 
-    shared.log(&format!("helper: game process {} connected (slot {})", hello.pid, hello.slot));
+    shared.log(&format!(
+        "helper: game process {} connected (slot {})",
+        hello.pid, hello.slot
+    ));
     let mut pending = Vec::new();
     let mut chunk = [0u8; 4096];
     loop {
@@ -436,21 +486,20 @@ fn serve_helper(shared: &Shared, mut stream: TcpStream) -> io::Result<()> {
             return Ok(());
         }
         pending.extend_from_slice(&chunk[..read]);
-        loop {
-            let (reply, kind, used) = match sesp::unframe(&pending).map_err(invalid)? {
-                Some((buffer, rest)) => {
-                    let request = sesp::parse(buffer).map_err(invalid)?;
-                    let monitor_id = shared.lock().monitor_id.clone();
-                    (sesp::respond(&request, &CAPABILITIES, &monitor_id), request.kind, pending.len() - rest.len())
-                }
-                None => break,
-            };
+        while let Some((buffer, rest)) = sesp::unframe(&pending).map_err(invalid)? {
+            let request = sesp::parse(buffer).map_err(invalid)?;
+            let monitor_id = shared.lock().monitor_id.clone();
+            let reply = sesp::respond(&request, &CAPABILITIES, &monitor_id);
+            let (kind, used) = (request.kind, pending.len() - rest.len());
             pending.drain(..used);
             conn.send(&sesp::frame(&reply))?;
             match kind {
                 sesp::T_HEAD_POSE_START => {
                     if shared.lock().posing.insert(hello.pid) {
-                        shared.log(&format!("helper: game process {} asked for head pose", hello.pid));
+                        shared.log(&format!(
+                            "helper: game process {} asked for head pose",
+                            hello.pid
+                        ));
                     }
                 }
                 sesp::T_HEAD_POSE_STOP => {
@@ -477,7 +526,10 @@ fn follow_driver(shared: Arc<Shared>) {
                 }
             }
             Err(err) if !reported => {
-                shared.log(&format!("tobiid: cannot connect to {} ({err}); retrying", path.display()));
+                shared.log(&format!(
+                    "tobiid: cannot connect to {} ({err}); retrying",
+                    path.display()
+                ));
                 reported = true;
             }
             Err(_) => {}
@@ -488,7 +540,11 @@ fn follow_driver(shared: Arc<Shared>) {
 
 fn driver_loop(shared: &Shared, mut stream: UnixStream) -> io::Result<()> {
     stream.write_all(&driver::frame(&driver::subscribe(DRIVER_STREAMS)))?;
-    stream.write_all(&driver::frame(&driver::request(AREA_REQUEST_ID, driver::KIND_DISPLAY_AREA_GET, &[])))?;
+    stream.write_all(&driver::frame(&driver::request(
+        AREA_REQUEST_ID,
+        driver::KIND_DISPLAY_AREA_GET,
+        &[],
+    )))?;
     let mut pending = Vec::new();
     let mut chunk = [0u8; 65536];
     let mut seen_gaze = false;
@@ -496,12 +552,15 @@ fn driver_loop(shared: &Shared, mut stream: UnixStream) -> io::Result<()> {
     loop {
         let read = stream.read(&mut chunk)?;
         if read == 0 {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "tobiid closed the connection"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "tobiid closed the connection",
+            ));
         }
         pending.extend_from_slice(&chunk[..read]);
         let mut used = 0;
-        while let Some((body, rest)) =
-            driver::unframe(&pending[used..]).map_err(|e| invalid(format!("frame of {} bytes", e.0)))?
+        while let Some((body, rest)) = driver::unframe(&pending[used..])
+            .map_err(|e| invalid(format!("frame of {} bytes", e.0)))?
         {
             used = pending.len() - rest.len();
             match tobiid::decode(body) {
@@ -517,9 +576,18 @@ fn driver_loop(shared: &Shared, mut stream: UnixStream) -> io::Result<()> {
                     }
                     on_pose(shared, &pose);
                 }
-                Some(ServerMsg::Presence { host_micros, status }) => on_presence(shared, host_micros, status),
-                Some(ServerMsg::Subscribed { ok }) => shared.log(&format!("tobiid: subscribed ok={ok}")),
-                Some(ServerMsg::Reply { request_id: AREA_REQUEST_ID, status, payload }) => on_display_area(shared, status, &payload),
+                Some(ServerMsg::Presence {
+                    host_micros,
+                    status,
+                }) => on_presence(shared, host_micros, status),
+                Some(ServerMsg::Subscribed { ok }) => {
+                    shared.log(&format!("tobiid: subscribed ok={ok}"))
+                }
+                Some(ServerMsg::Reply {
+                    request_id: AREA_REQUEST_ID,
+                    status,
+                    payload,
+                }) => on_display_area(shared, status, &payload),
                 Some(ServerMsg::Reply { .. }) | None => {}
             }
         }
@@ -601,13 +669,20 @@ fn on_pose(shared: &Shared, pose: &HeadPose) {
 }
 
 fn on_display_area(shared: &Shared, status: u8, payload: &[u8]) {
-    let corners = (status == driver::STATUS_OK).then(|| driver::display_area(payload)).flatten();
+    let corners = (status == driver::STATUS_OK)
+        .then(|| driver::display_area(payload))
+        .flatten();
     let Some(corners) = corners else {
-        shared.log(&format!("tobiid: no display area (status {status}); the recorded one stays in use"));
+        shared.log(&format!(
+            "tobiid: no display area (status {status}); the recorded one stays in use"
+        ));
         return;
     };
     let corners = corners.map(|corner| corner.map(f64::from));
-    let reply = shared.replies.get(&CMD_DISPLAY_AREA).and_then(|recorded| frames::display_area_reply(recorded, corners));
+    let reply = shared
+        .replies
+        .get(&CMD_DISPLAY_AREA)
+        .and_then(|recorded| frames::display_area_reply(recorded, corners));
     let display = DisplayFrame::new(corners[0], corners[1], corners[2]);
     let (Some(reply), Some(display)) = (reply, display) else {
         shared.log("tobiid: display area is not usable; the recorded one stays in use");

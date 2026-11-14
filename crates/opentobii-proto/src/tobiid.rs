@@ -57,9 +57,13 @@ pub fn frame(body: &[u8]) -> Vec<u8> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Oversized(pub usize);
 
+/// One whole frame body and the bytes after it, or `None` while a frame is
+/// incomplete.
+pub type Split<'a> = Option<(&'a [u8], &'a [u8])>;
+
 /// Split one frame body off the front of `buffer`: `Ok(Some((body, rest)))`,
 /// or `Ok(None)` while the frame is incomplete.
-pub fn unframe(buffer: &[u8]) -> Result<Option<(&[u8], &[u8])>, Oversized> {
+pub fn unframe(buffer: &[u8]) -> Result<Split<'_>, Oversized> {
     let Some(head) = buffer.get(..4) else {
         return Ok(None);
     };
@@ -148,9 +152,18 @@ pub struct GazeRaw {
 /// One daemon-to-client message.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ServerMsg {
-    Subscribed { ok: bool },
-    Reply { request_id: u32, status: u8, payload: Vec<u8> },
-    Presence { host_micros: i64, status: u8 },
+    Subscribed {
+        ok: bool,
+    },
+    Reply {
+        request_id: u32,
+        status: u8,
+        payload: Vec<u8>,
+    },
+    Presence {
+        host_micros: i64,
+        status: u8,
+    },
     HeadPose(HeadPose),
     GazeRaw(Box<GazeRaw>),
 }
@@ -245,7 +258,10 @@ pub fn decode(body: &[u8]) -> Option<ServerMsg> {
             status: r.u8()?,
             payload: r.0.to_vec(),
         }),
-        TAG_PRESENCE => Some(ServerMsg::Presence { host_micros: r.i64()?, status: r.u8()? }),
+        TAG_PRESENCE => Some(ServerMsg::Presence {
+            host_micros: r.i64()?,
+            status: r.u8()?,
+        }),
         TAG_HEAD_POSE => {
             let host_micros = r.i64()?;
             let flags = r.u8()?;
@@ -300,7 +316,13 @@ pub mod testing {
             out.extend_from_slice(&value.to_le_bytes());
         }
         out.extend_from_slice(&raw.combined_validity.to_le_bytes());
-        for word in [raw.key_0e, raw.key_11, raw.frame_counter, raw.left_origin_flag, raw.right_origin_flag] {
+        for word in [
+            raw.key_0e,
+            raw.key_11,
+            raw.frame_counter,
+            raw.left_origin_flag,
+            raw.right_origin_flag,
+        ] {
             out.push(u8::from(word.is_some()));
             out.extend_from_slice(&word.unwrap_or(0).to_le_bytes());
         }
@@ -326,7 +348,8 @@ pub mod testing {
     #[must_use]
     pub fn head_pose_body(pose: &HeadPose) -> Vec<u8> {
         let [x, y, z] = pose.rotation_valid;
-        let flags = u8::from(pose.position_valid) | u8::from(x) << 1 | u8::from(y) << 2 | u8::from(z) << 3;
+        let flags =
+            u8::from(pose.position_valid) | u8::from(x) << 1 | u8::from(y) << 2 | u8::from(z) << 3;
         let mut out = vec![TAG_HEAD_POSE];
         out.extend_from_slice(&pose.host_micros.to_le_bytes());
         out.push(flags);
@@ -391,12 +414,18 @@ mod tests {
 
     #[test]
     fn an_absurd_length_is_refused() {
-        assert_eq!(unframe(&[0xff, 0xff, 0xff, 0x7f, 0]), Err(Oversized(0x7fff_ffff)));
+        assert_eq!(
+            unframe(&[0xff, 0xff, 0xff, 0x7f, 0]),
+            Err(Oversized(0x7fff_ffff))
+        );
     }
 
     #[test]
     fn subscribe_and_request_bodies() {
-        assert_eq!(subscribe(STREAM_GAZE_RAW | STREAM_HEAD_POSE), [1, 0, 3, 0, 0]);
+        assert_eq!(
+            subscribe(STREAM_GAZE_RAW | STREAM_HEAD_POSE),
+            [1, 0, 3, 0, 0]
+        );
         assert_eq!(request(7, KIND_DISPLAY_AREA_GET, &[]), [3, 7, 0, 0, 0, 3]);
     }
 
@@ -405,7 +434,11 @@ mod tests {
         assert_eq!(decode(&[0x10, 1]), Some(ServerMsg::Subscribed { ok: true }));
         assert_eq!(
             decode(b"\x11\x07\x00\x00\x00\x00xyz"),
-            Some(ServerMsg::Reply { request_id: 7, status: 0, payload: b"xyz".to_vec() })
+            Some(ServerMsg::Reply {
+                request_id: 7,
+                status: 0,
+                payload: b"xyz".to_vec()
+            })
         );
     }
 
@@ -413,7 +446,10 @@ mod tests {
     fn presence() {
         assert_eq!(
             decode(&presence_body(42, PRESENCE_PRESENT)),
-            Some(ServerMsg::Presence { host_micros: 42, status: 2 })
+            Some(ServerMsg::Presence {
+                host_micros: 42,
+                status: 2
+            })
         );
     }
 
@@ -436,7 +472,10 @@ mod tests {
     #[test]
     fn gaze_raw_without_the_tail() {
         let raw = sample();
-        assert_eq!(decode(&gaze_raw_body(&raw)), Some(ServerMsg::GazeRaw(Box::new(raw))));
+        assert_eq!(
+            decode(&gaze_raw_body(&raw)),
+            Some(ServerMsg::GazeRaw(Box::new(raw)))
+        );
     }
 
     #[test]
@@ -462,8 +501,16 @@ mod tests {
 
     #[test]
     fn display_area_reply() {
-        let corners = [[-300.0, 340.0, 100.0], [300.0, 340.0, 100.0], [-300.0, 5.0, -2.0]];
-        let payload: Vec<u8> = corners.iter().flatten().flat_map(|v: &f32| v.to_le_bytes()).collect();
+        let corners = [
+            [-300.0, 340.0, 100.0],
+            [300.0, 340.0, 100.0],
+            [-300.0, 5.0, -2.0],
+        ];
+        let payload: Vec<u8> = corners
+            .iter()
+            .flatten()
+            .flat_map(|v: &f32| v.to_le_bytes())
+            .collect();
         assert_eq!(display_area(&payload), Some(corners));
         assert_eq!(display_area(&payload[..20]), None);
     }

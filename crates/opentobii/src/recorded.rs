@@ -41,7 +41,9 @@ pub(crate) fn presence_frame() -> Vec<u8> {
 }
 
 fn payload(hex: &str) -> Vec<u8> {
-    Message::from_usb_hex(hex).expect("built-in recording is valid").payload
+    Message::from_usb_hex(hex)
+        .expect("built-in recording is valid")
+        .payload
 }
 
 #[cfg(test)]

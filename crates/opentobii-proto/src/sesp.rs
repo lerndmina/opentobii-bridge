@@ -83,11 +83,15 @@ pub fn frame(buffer: &[u8]) -> Vec<u8> {
     out
 }
 
+/// One whole buffer and the bytes after it, or `None` while a frame is
+/// incomplete.
+pub type Split<'a> = Option<(&'a [u8], &'a [u8])>;
+
 /// Split one buffer off the front of `data`.
 ///
 /// `Ok(Some((buffer, rest)))` for a whole frame, `Ok(None)` while one has
 /// not fully arrived.
-pub fn unframe(data: &[u8]) -> Result<Option<(&[u8], &[u8])>, Error> {
+pub fn unframe(data: &[u8]) -> Result<Split<'_>, Error> {
     if data.len() < FRAME_HEAD_LEN {
         return Ok(None);
     }
@@ -135,7 +139,7 @@ impl Table {
 }
 
 fn pad4(out: &mut Vec<u8>) {
-    while out.len() % 4 != 0 {
+    while !out.len().is_multiple_of(4) {
         out.push(0);
     }
 }
@@ -153,7 +157,11 @@ fn put_u32(out: &mut [u8], at: usize, value: usize) {
 /// Append a table, its vtable and everything it points to. Returns the
 /// table's position.
 fn write_table(out: &mut Vec<u8>, table: &Table) -> usize {
-    let count = table.0.keys().next_back().map_or(0, |last| usize::from(*last) + 1);
+    let count = table
+        .0
+        .keys()
+        .next_back()
+        .map_or(0, |last| usize::from(*last) + 1);
     pad4(out);
     let vtable_at = out.len();
     out.resize(vtable_at + 4 + 2 * count, 0);
@@ -232,10 +240,18 @@ impl<'a> View<'a> {
         let vtable = i64::try_from(at).map_err(|_| Error::OutOfBounds)? - i64::from(back);
         let vtable = usize::try_from(vtable).map_err(|_| Error::OutOfBounds)?;
         let vtable_size = usize::from(le_u16(buf, vtable).ok_or(Error::OutOfBounds)?);
-        if vtable.checked_add(vtable_size).is_none_or(|end| end > buf.len()) {
+        if vtable
+            .checked_add(vtable_size)
+            .is_none_or(|end| end > buf.len())
+        {
             return Err(Error::OutOfBounds);
         }
-        Ok(Self { buf, at, vtable, vtable_size })
+        Ok(Self {
+            buf,
+            at,
+            vtable,
+            vtable_size,
+        })
     }
 
     fn slot(&self, number: u16) -> Option<usize> {
@@ -250,13 +266,17 @@ impl<'a> View<'a> {
     /// Field `number` as a `u8`, or `default` when absent.
     #[must_use]
     pub fn u8(&self, number: u16, default: u8) -> u8 {
-        self.slot(number).and_then(|at| self.buf.get(at).copied()).unwrap_or(default)
+        self.slot(number)
+            .and_then(|at| self.buf.get(at).copied())
+            .unwrap_or(default)
     }
 
     /// Field `number` as a `u32`, or `default` when absent.
     #[must_use]
     pub fn u32(&self, number: u16, default: u32) -> u32 {
-        self.slot(number).and_then(|at| le_u32(self.buf, at)).unwrap_or(default)
+        self.slot(number)
+            .and_then(|at| le_u32(self.buf, at))
+            .unwrap_or(default)
     }
 
     /// Field `number` as an `f32`, or `default` when absent.
@@ -302,7 +322,11 @@ pub struct Parsed<'a> {
 pub fn parse(buffer: &[u8]) -> Result<Parsed<'_>, Error> {
     let root_at = le_u32(buffer, 0).ok_or(Error::OutOfBounds)? as usize;
     let root = View::new(buffer, root_at)?;
-    Ok(Parsed { sequence: root.u32(0, 0), kind: root.u8(1, 0), payload: root.table(2) })
+    Ok(Parsed {
+        sequence: root.u32(0, 0),
+        kind: root.u8(1, 0),
+        payload: root.table(2),
+    })
 }
 
 // --- the service's messages --------------------------------------------------
@@ -323,7 +347,11 @@ pub fn initialize_response(sequence: u32, capabilities: &[u16], error: u32) -> V
 /// A response whose only payload field is the error word.
 #[must_use]
 pub fn error_response(sequence: u32, kind: u8, error: u32) -> Vec<u8> {
-    let table = if error == 0 { Table::new() } else { Table::new().with(0, Value::U32(error)) };
+    let table = if error == 0 {
+        Table::new()
+    } else {
+        Table::new().with(0, Value::U32(error))
+    };
     build(sequence, kind, table)
 }
 
@@ -337,7 +365,12 @@ pub fn display_info_response(sequence: u32, monitor_id: &str) -> Vec<u8> {
 
 /// A head pose with every validity left at its default of 1 (valid).
 #[must_use]
-pub fn head_pose(sequence: u32, micros: u64, position_mm: [f32; 3], rotation_rad: [f32; 3]) -> Vec<u8> {
+pub fn head_pose(
+    sequence: u32,
+    micros: u64,
+    position_mm: [f32; 3],
+    rotation_rad: [f32; 3],
+) -> Vec<u8> {
     let mut table = Table::new()
         .with(0, Value::U32((micros >> 32) as u32))
         .with(1, Value::U32(micros as u32));
@@ -529,14 +562,37 @@ mod tests {
         let cases = include_str!("../testdata/sesp_golden.txt");
         let built = [
             ("initialize", initialize_response(1, &CAPS, 0)),
-            ("display_info", display_info_response(2, "DISPLAY\\GSM5C7C\\5&1234&0&UID4353")),
-            ("head_pose", head_pose(77, (3u64 << 32) | 0x89AB_CDEF, [1.5, -2.0, 600.0], [0.1, 0.2, -0.3])),
-            ("head_pose_start", error_response(3, T_HEAD_POSE_START_RESPONSE, 0)),
-            ("stream_status", build(4, T_STREAM_STATUS_RESPONSE, Table::new())),
-            ("not_supported", error_response(5, T_INVALID_OPERATION, ERROR_NOT_SUPPORTED)),
+            (
+                "display_info",
+                display_info_response(2, "DISPLAY\\GSM5C7C\\5&1234&0&UID4353"),
+            ),
+            (
+                "head_pose",
+                head_pose(
+                    77,
+                    (3u64 << 32) | 0x89AB_CDEF,
+                    [1.5, -2.0, 600.0],
+                    [0.1, 0.2, -0.3],
+                ),
+            ),
+            (
+                "head_pose_start",
+                error_response(3, T_HEAD_POSE_START_RESPONSE, 0),
+            ),
+            (
+                "stream_status",
+                build(4, T_STREAM_STATUS_RESPONSE, Table::new()),
+            ),
+            (
+                "not_supported",
+                error_response(5, T_INVALID_OPERATION, ERROR_NOT_SUPPORTED),
+            ),
         ];
         let mut seen = 0;
-        for line in cases.lines().filter(|line| !line.is_empty() && !line.starts_with('#')) {
+        for line in cases
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        {
             let (name, want) = line.split_once(' ').expect("name and hex");
             let (_, got) = built.iter().find(|(n, _)| *n == name).expect("known case");
             assert_eq!(hex(got), want, "{name}");
