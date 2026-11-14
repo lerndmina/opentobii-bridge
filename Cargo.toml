@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/opentobii-proto"]
+members = ["crates/opentobii-core", "crates/opentobii-proto"]
 
 [workspace.package]
 version = "0.1.0"
