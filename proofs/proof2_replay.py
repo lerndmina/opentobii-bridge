@@ -109,6 +109,13 @@ class Replay:
         except (ConnectionError, asyncio.CancelledError):
             log(tag, "gaze stream ended")
 
+    async def start_presence(self, writer: asyncio.StreamWriter) -> None:
+        once = ttp.Message(
+            ttp.MARKER_STREAM, 0, 0, STREAM_PRESENCE, 0, self.stamp(self.presence.payload)
+        )
+        writer.write(once.encode())
+        await writer.drain()
+
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self.connections += 1
         tag = f"conn#{self.connections}"
@@ -137,12 +144,7 @@ class Replay:
                     if stream == STREAM_GAZE and stream not in streams:
                         streams[stream] = asyncio.create_task(self.stream_gaze(writer, tag))
                     elif stream == STREAM_PRESENCE:
-                        once = ttp.Message(
-                            ttp.MARKER_STREAM, 0, 0, STREAM_PRESENCE, 0,
-                            self.stamp(self.presence.payload),
-                        )
-                        writer.write(once.encode())
-                        await writer.drain()
+                        await self.start_presence(writer)
                 elif request.id == CMD_STREAM_STOP and stream in streams:
                     streams.pop(stream).cancel()
         except asyncio.IncompleteReadError as end:
