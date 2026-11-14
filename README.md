@@ -55,7 +55,7 @@ The tuning window's Gaze overlay card switches on a mark that shows where you ar
 
 ## Face login camera (experimental)
 
-The tracker films you in infrared to find your eyes. The daemon can publish that picture as a webcam, so a face login program such as [Howdy](https://github.com/boltgolt/howdy) can use the tracker instead of a laptop's IR camera. This part has not yet been tested against a real device.
+The tracker films you in infrared to find your eyes. The daemon can publish that picture as a webcam, so a face login program such as [Howdy](https://github.com/boltgolt/howdy) can use the tracker instead of a laptop's IR camera. The feed is tested against v4l2loopback 0.15.4; Howdy itself has not been tried with it yet.
 
 It needs the `v4l2loopback` kernel module, with one device set aside for it. On Fedora, with RPM Fusion enabled:
 

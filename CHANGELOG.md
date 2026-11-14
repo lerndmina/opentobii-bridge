@@ -4,7 +4,7 @@ The release workflow publishes the section for the version being released as tha
 
 ## Unreleased
 
-- Face login camera: the daemon can publish the tracker's infrared picture on a v4l2loopback device, for Howdy. It feeds pictures only while a program reads the device. Not yet tested against a real device.
+- Face login camera: the daemon can publish the tracker's infrared picture on a v4l2loopback device, for Howdy. It feeds pictures only while a program reads the device.
 
 ## 0.2.2
 
