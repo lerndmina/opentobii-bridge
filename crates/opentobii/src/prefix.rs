@@ -335,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn the_key_matches_what_the_python_installer_wrote() {
+    fn the_key_matches_what_first_worked_in_a_real_prefix() {
         // Nine lines were appended to the real ETS2 prefix on 2026-11-14 and
         // Wine started the service from them.
         let appended = &add_service(REGISTRY)[REGISTRY.len()..];

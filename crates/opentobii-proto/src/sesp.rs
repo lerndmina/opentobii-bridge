@@ -554,7 +554,8 @@ mod tests {
         assert_eq!(reply.payload.unwrap().u32(0, 0), ERROR_NOT_SUPPORTED);
     }
 
-    /// The Python proofs' output for the same messages, which ETS2's DLL
+    /// The output of the project's first, Python, implementation (removed
+    /// since) for the same messages, which ETS2's DLL
     /// accepted on 2026-11-14. Byte for byte, so the Rust daemon sends what
     /// was proven to work.
     #[test]
