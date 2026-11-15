@@ -2,6 +2,12 @@
 
 The release workflow publishes the section for the version being released as that release's notes, and the tuning window shows its first lines in the update banner.
 
+## 0.3.0
+
+- Nod to approve: after Howdy recognises your face on a sudo prompt or a system "Authentication Required" dialog, a banner asks for a nod. A nod approves, a head shake denies, and no answer in 15 seconds falls back to the password. The tracker's head pose decides.
+- `opentobii login-helper install` (with sudo) installs the small root-owned program PAM runs for this. `opentobii login-helper` shows the two PAM lines. The README's "Nod to approve" section has the steps.
+- `opentobii status` and the Face login camera card say whether the helper is installed.
+
 ## 0.2.4
 
 - The Games card lists games outside Steam: Wine prefixes under `~/Games`, Bottles and `~/.wine` that hold Tobii's DLL, such as Star Citizen from the LUG helper.

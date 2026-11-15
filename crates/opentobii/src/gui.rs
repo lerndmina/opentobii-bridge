@@ -715,6 +715,16 @@ impl Ui {
             self.status.camera.as_str()
         };
         app.set_camera_status(status.into());
+        let nod = match crate::login::installed() {
+            crate::login::Installed::No => "Nod to approve: the login helper is not installed. \
+                 Run `opentobii login-helper` in a terminal for how."
+                .to_owned(),
+            other => format!(
+                "Nod to approve: login helper {}. `opentobii login-helper` shows the PAM lines.",
+                crate::login::describe(&other)
+            ),
+        };
+        app.set_nod_status(nod.into());
     }
 
     /// The overlay card, from the settings.

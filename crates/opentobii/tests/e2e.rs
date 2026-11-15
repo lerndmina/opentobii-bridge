@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use opentobii::daemon::{monotonic_micros, start, Config, Running};
 use opentobii_core::config::Config as Tuning;
-use opentobii_core::control::{Line, Request};
+use opentobii_core::control::{Answer, Line, Request};
 use opentobii_core::overlay::{Overlay, Style};
 use opentobii_core::pipeline::{Axis, Profile, Smoothing};
 use opentobii_proto::frames::{display_area_corners, keyed_values, Keyed};
@@ -85,6 +85,7 @@ fn rig(tuning: Tuning) -> Rig {
         control_socket: Some(dir.join("opentobii.sock")),
         monitor_index: None,
         manage_overlay: false,
+        confirm_banner: false,
     })
     .unwrap();
     let (driver, greeting) = rx
@@ -766,6 +767,7 @@ fn a_second_daemon_on_the_same_control_socket_does_not_start() {
         control_socket: rig.running.control_socket.clone(),
         monitor_index: None,
         manage_overlay: false,
+        confirm_banner: false,
     });
     let err = second.expect_err("the socket is taken");
     assert!(
@@ -887,4 +889,119 @@ fn overlay_settings_are_checked_saved_and_announced() {
     assert_eq!(config.overlay, wanted);
     let saved = Tuning::load(&rig._dir.0.join("config.toml")).unwrap();
     assert_eq!(saved.overlay, wanted);
+}
+
+// --- the nod that approves a face login --------------------------------------
+
+fn send_head(rig: &mut Rig, host_micros: i64, pitch: f32, yaw: f32) {
+    let pose = HeadPose {
+        host_micros,
+        position_valid: true,
+        position_mm: [0.0, 0.0, 700.0],
+        rotation_valid: [true; 3],
+        rotation_rad: [pitch.to_radians(), yaw.to_radians(), 0.0],
+    };
+    rig.driver
+        .write_all(&tobiid::frame(&head_pose_body(&pose)))
+        .unwrap();
+}
+
+/// The head goes 15 degrees one way and straight back in half a second of
+/// tracker time, on pitch (a nod) or yaw (a shake).
+fn gesture(rig: &mut Rig, nod: bool) {
+    let start = monotonic_micros();
+    for step in 0..=16i16 {
+        let out = f32::from(8 - (step - 8).abs()) / 8.0;
+        let (pitch, yaw) = if nod {
+            (-15.0 * out, 0.0)
+        } else {
+            (0.0, 15.0 * out)
+        };
+        send_head(rig, start + i64::from(step) * 30_000, pitch, yaw);
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// Send `confirm` without waiting for the answer, once the daemon has seen
+/// a pose and so knows somebody is there.
+fn ask_for_a_nod(rig: &mut Rig) -> Control {
+    send_head(rig, monotonic_micros(), 0.0, 0.0);
+    thread::sleep(Duration::from_millis(50));
+    let mut control = Control::connect(rig);
+    control.send_text(r#"{"cmd":"confirm","service":"polkit-1"}"#);
+    thread::sleep(Duration::from_millis(100));
+    control
+}
+
+fn confirmed(answer: Answer) -> Line {
+    Line::Confirmed { answer }
+}
+
+#[test]
+fn a_nod_approves_and_a_shake_denies() {
+    let mut rig = rig(Tuning::default());
+    let mut control = ask_for_a_nod(&mut rig);
+    gesture(&mut rig, true);
+    assert_eq!(control.line(), confirmed(Answer::Approved));
+
+    // The same connection can ask again: the first prompt is over.
+    thread::sleep(Duration::from_millis(400));
+    send_head(&mut rig, monotonic_micros(), 0.0, 0.0);
+    control.send_text(r#"{"cmd":"confirm"}"#);
+    thread::sleep(Duration::from_millis(100));
+    gesture(&mut rig, false);
+    assert_eq!(control.line(), confirmed(Answer::Denied));
+}
+
+#[test]
+fn no_answer_times_out_and_a_second_prompt_is_refused_meanwhile() {
+    let mut tuning = Tuning::default();
+    tuning.confirm.seconds = 3.0;
+    let mut rig = rig(tuning);
+    let mut first = ask_for_a_nod(&mut rig);
+    let asked = Instant::now();
+
+    let mut second = Control::connect(&rig);
+    assert_eq!(
+        second.ask(&Request::Confirm { service: None }),
+        confirmed(Answer::Unavailable)
+    );
+    assert!(asked.elapsed() < Duration::from_secs(1), "refused at once");
+
+    // Looking down at the keyboard and staying there is not a nod.
+    let start = monotonic_micros();
+    for step in 0..10i16 {
+        send_head(
+            &mut rig,
+            start + i64::from(step) * 30_000,
+            -1.6 * f32::from(step),
+            0.0,
+        );
+    }
+    assert_eq!(first.line(), confirmed(Answer::Timeout));
+    assert!(asked.elapsed() >= Duration::from_millis(2900));
+}
+
+#[test]
+fn with_nobody_tracked_the_question_is_not_put() {
+    let rig = rig(Tuning::default());
+    let mut control = Control::connect(&rig);
+    let asked = Instant::now();
+    assert_eq!(
+        control.ask(&Request::Confirm { service: None }),
+        confirmed(Answer::Unavailable)
+    );
+    assert!(asked.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn a_cancelled_dialog_ends_its_prompt() {
+    let mut rig = rig(Tuning::default());
+    let gone = ask_for_a_nod(&mut rig);
+    drop(gone);
+    thread::sleep(Duration::from_millis(300));
+
+    let mut control = ask_for_a_nod(&mut rig);
+    gesture(&mut rig, true);
+    assert_eq!(control.line(), confirmed(Answer::Approved));
 }

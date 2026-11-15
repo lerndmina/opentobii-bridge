@@ -380,7 +380,7 @@ fn calibrated_monitor(text: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn driver_monitor() -> Option<String> {
+pub(crate) fn driver_monitor() -> Option<String> {
     let base = match std::env::var_os("XDG_CONFIG_HOME") {
         Some(dir) if !dir.is_empty() => std::path::PathBuf::from(dir),
         _ => std::path::PathBuf::from(std::env::var_os("HOME")?).join(".config"),

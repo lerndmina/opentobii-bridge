@@ -11,7 +11,7 @@ Not affiliated with Tobii.
 - **Games.** Games that ship Tobii's own `tobii_gameintegration` DLL see a tracker, as they do on Windows. No game files are changed. One small helper program and one registry key go into the game's Proton prefix, and both come out again cleanly.
 - **Tuning.** A window to adjust smoothing, dead zone, sensitivity, curve and limits per axis, with a profile per game, and to recentre.
 - **Gaze overlay.** An optional mark on screen showing where you are looking.
-- **Face login.** The tracker's infrared picture published as a webcam, for [Howdy](https://github.com/boltgolt/howdy).
+- **Face login.** The tracker's infrared picture published as a webcam, for [Howdy](https://github.com/boltgolt/howdy), and a nod to approve a prompt after your face is recognised.
 
 opentobii is not a USB driver. It builds on [Skyggedans/tobii-linux](https://github.com/Skyggedans/tobii-linux), which talks to the tracker.
 
@@ -121,6 +121,33 @@ The login screen at boot is not covered. The tracker and the camera are only ope
 
 Howdy's own advice applies: do not make face login the only way in.
 
+### Nod to approve
+
+With the lines above, a face match approves a prompt the moment it appears, including one you did not expect. opentobii can ask for a nod first. After Howdy recognises you, a banner at the top of the tracker's monitor says so, and the tracker's head pose decides: a nod approves, a head shake denies, and neither within 15 seconds falls back to the password box. This also covers the graphical "Authentication Required" dialogs (polkit), which Howdy's own nod check cannot.
+
+PAM runs a small helper as root for this, so it must be a file only root can change. Install it:
+
+```sh
+sudo ~/.local/bin/opentobii login-helper install
+```
+
+It goes to `/usr/local/libexec/opentobii-confirm`. The rpm and deb packages ship it at `/usr/libexec/opentobii-confirm`, with nothing to install. `opentobii login-helper` shows what is there and the two PAM lines with the right path.
+
+Then, in each PAM file where you want the nod, two lines take the place of the single `pam_howdy.so` line:
+
+```
+auth  [success=ok default=1]        pam_howdy.so
+auth  [success=done default=ignore] pam_exec.so quiet /usr/local/libexec/opentobii-confirm
+```
+
+For sudo that is `/etc/pam.d/sudo`. For the graphical dialogs, copy `/usr/lib/pam.d/polkit-1` to `/etc/pam.d/polkit-1` and put the two lines above its first `auth` line. The lock screen is better left as a plain face match: you started that one yourself.
+
+A failed face match skips the helper and asks for the password. A match followed by anything other than a nod also asks for the password. The helper reads only the user's name and the service's name from PAM, gives up root before it talks to your daemon, and exits 0 only on a nod.
+
+What it is for: a prompt you did not expect is not approved just because you were at the screen. It is not a second factor. A program already running as you could answer in the daemon's place, as it could already use a face-only login.
+
+The wait is `[confirm] seconds` in the settings file, from 3 to 60.
+
 ## Updating
 
 A copy installed with `setup` updates itself. The window looks for a newer release when it opens and every hour after, and shows a banner with an **Update** button; its About box has a **Check for updates** button. From a terminal:
@@ -163,6 +190,7 @@ opentobii update [--check]        update to the newest release
 opentobii gui                     open the tuning window
 opentobii status                  what the running daemon is connected to
 opentobii service [start|stop|restart|enable|disable]
+opentobii login-helper [install|remove]   the nod-to-approve helper for PAM
 opentobii games                   Steam games that can use the tracker
 opentobii install GAME [--helper PATH]
 opentobii uninstall GAME
@@ -192,6 +220,9 @@ enabled = false
 [camera]
 enabled = true
 device = "/dev/video10"
+
+[confirm]
+seconds = 15.0
 ```
 
 A game is named by its executable's file name in lower case. Each axis (`pitch`, `yaw`, `roll`, `x`, `y`, `z`) has `dead_zone`, `sensitivity`, `curve`, `invert` and `limit`; `[default.smoothing]` holds the filter settings.
@@ -209,6 +240,7 @@ The daemon listens on `$XDG_RUNTIME_DIR/opentobii.sock`, one JSON object per lin
 | `{"cmd":"set_overlay","overlay":{...}}` | Replaces the overlay's settings |
 | `{"cmd":"set_camera","camera":{...}}` | Replaces the camera's settings |
 | `{"cmd":"subscribe","poses":true,"gaze":false}` | Streams head poses, gaze points and a status line every second |
+| `{"cmd":"confirm","service":"sudo"}` | Shows the nod banner and answers `approved`, `denied`, `timeout` or `unavailable` |
 
 Changes apply at once and are saved to the settings file.
 

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use opentobii_core::config::game_key;
 use opentobii_core::control::{GameStatus, GazePoint, Line, RawPose, Request, Status};
 
-use super::{effective, spawn, Shared, State};
+use super::{confirm, effective, spawn, Shared, State};
 
 /// Longest request line accepted. A whole profile is under 2 kB.
 const MAX_LINE: u64 = 64 * 1024;
@@ -124,6 +124,11 @@ fn requests(shared: &Shared, stream: UnixStream, watcher: &Arc<Watcher>) -> io::
             continue;
         }
         let reply = match serde_json::from_str::<Request>(&text) {
+            // Waits for the person's answer, so it is not done under the
+            // state lock like the rest.
+            Ok(Request::Confirm { service }) => Line::Confirmed {
+                answer: confirm::run(shared, reader.get_ref(), service),
+            },
             Ok(request) => handle(shared, request, watcher),
             Err(err) => Line::Error {
                 reason: format!("not a request: {err}"),
@@ -143,6 +148,7 @@ fn handle(shared: &Shared, request: Request, watcher: &Arc<Watcher>) -> Line {
     let mut state = shared.lock();
     let state = &mut *state;
     match request {
+        Request::Confirm { .. } => refuse("confirm is answered before this point"),
         Request::Get => Line::State {
             config: state.tuning.clone(),
             status: status(shared, state),

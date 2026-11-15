@@ -1,0 +1,16 @@
+[package]
+name = "opentobii-confirm"
+description = "Login helper for opentobii: asks the user's daemon for a nod after a face match. Run by pam_exec as root."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+# Already in the tree through the window's toolkit. Used for the user
+# lookup and for giving up root, so this crate needs no unsafe code.
+nix = { version = "0.31", default-features = false, features = ["user"] }
+
+[lints]
+workspace = true

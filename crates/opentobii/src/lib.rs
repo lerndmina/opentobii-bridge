@@ -7,11 +7,14 @@
 //! - a TCP listener for the helper inside the game's prefix, which relays
 //!   the services pipe that carries the display id and head pose (47455).
 
+#[cfg(feature = "overlay")]
+pub mod banner;
 pub mod daemon;
 pub mod games;
 #[cfg(feature = "gui")]
 pub mod gui;
 pub mod install;
+pub mod login;
 #[cfg(feature = "overlay")]
 pub mod overlay;
 pub mod prefix;

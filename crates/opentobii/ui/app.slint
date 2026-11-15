@@ -436,6 +436,7 @@ export component App inherits Window {
 
     in property <bool> camera-enabled;
     in property <string> camera-status;
+    in property <string> nod-status;
     in property <bool> overlay-enabled;
     in property <[string]> overlay-styles;
     in-out property <int> overlay-style-index;
@@ -1110,6 +1111,12 @@ export component App inherits Window {
                         }
                         Text {
                             text: root.camera-status;
+                            color: Theme.muted;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                        Text {
+                            text: root.nod-status;
                             color: Theme.muted;
                             font-size: 12px;
                             wrap: word-wrap;

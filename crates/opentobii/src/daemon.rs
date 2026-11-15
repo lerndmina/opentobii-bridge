@@ -22,6 +22,7 @@ use opentobii_proto::{sesp, tobiid as driver};
 use crate::recorded;
 
 mod camera;
+mod confirm;
 mod control;
 
 pub const TTP_PORT: u16 = 4455;
@@ -74,6 +75,9 @@ pub struct Config {
     pub manage_overlay: bool,
     /// Which monitor to report to the game; `None` picks the primary.
     pub monitor_index: Option<usize>,
+    /// Show the banner while a nod is being asked for. Without it nothing
+    /// tells the person to nod, so only tests switch it off.
+    pub confirm_banner: bool,
 }
 
 impl Default for Config {
@@ -88,6 +92,7 @@ impl Default for Config {
             control_socket: Some(opentobii_core::control::socket_path()),
             manage_overlay: true,
             monitor_index: None,
+            confirm_banner: true,
         }
     }
 }
@@ -186,6 +191,8 @@ struct State {
     camera_status: String,
     /// Control clients that subscribed to poses and status.
     watchers: Vec<Arc<control::Watcher>>,
+    /// Where head poses also go while a nod is being asked for.
+    confirm_tap: Option<std::sync::mpsc::Sender<RawPose>>,
 }
 
 #[derive(Debug)]
@@ -200,6 +207,8 @@ struct Shared {
     started: Instant,
     /// Set when the overlay's settings change, to let its keeper try again.
     overlay_retry: std::sync::atomic::AtomicBool,
+    /// A nod is being asked for; a second prompt is refused meanwhile.
+    confirming: std::sync::atomic::AtomicBool,
 }
 
 impl Shared {
@@ -303,12 +312,14 @@ pub fn start(config: Config) -> io::Result<Running> {
             display_width_mm: None,
             camera_status: String::new(),
             watchers: Vec::new(),
+            confirm_tap: None,
         }),
         replies: recorded::replies(),
         gaze_template: Template::new(recorded::gaze_frame()),
         presence_template: Template::new(recorded::presence_frame()),
         stats: Stats::default(),
         overlay_retry: std::sync::atomic::AtomicBool::new(false),
+        confirming: std::sync::atomic::AtomicBool::new(false),
         next_conn: AtomicU64::new(1),
         started: Instant::now(),
         config,
@@ -863,18 +874,24 @@ fn on_presence(shared: &Shared, host_micros: i64, status: u8) {
 }
 
 fn on_pose(shared: &Shared, pose: &HeadPose) {
-    let watchers = shared.lock().watchers.clone();
-    if !watchers.is_empty() {
-        control::send_pose(
-            shared,
-            &watchers,
-            RawPose {
-                micros: pose.host_micros,
-                position_mm: pose.position_mm,
-                rotation_deg: pose.rotation_rad.map(f32::to_degrees),
-                valid: pose.valid(),
-            },
-        );
+    let (watchers, tap) = {
+        let state = shared.lock();
+        (state.watchers.clone(), state.confirm_tap.clone())
+    };
+    if !watchers.is_empty() || tap.is_some() {
+        let raw = RawPose {
+            micros: pose.host_micros,
+            position_mm: pose.position_mm,
+            rotation_deg: pose.rotation_rad.map(f32::to_degrees),
+            valid: pose.valid(),
+        };
+        if let Some(tap) = tap {
+            // The prompt may have just ended; that is not an error.
+            let _ = tap.send(raw);
+        }
+        if !watchers.is_empty() {
+            control::send_pose(shared, &watchers, raw);
+        }
     }
     if !pose.valid() {
         // The validity fields' width in the services message is not known

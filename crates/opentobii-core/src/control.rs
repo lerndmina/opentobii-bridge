@@ -67,6 +67,15 @@ pub enum Request {
         #[serde(default)]
         gaze: bool,
     },
+    /// Ask the person at the screen to nod (yes) or shake their head (no).
+    /// The daemon shows a banner and answers with [`Line::Confirmed`] when
+    /// it has an answer or the time in the settings has run out. Sent by
+    /// the login helper after a face match.
+    Confirm {
+        /// What is asking, for the banner: the PAM service's name.
+        #[serde(default)]
+        service: Option<String>,
+    },
 }
 
 fn yes() -> bool {
@@ -98,6 +107,24 @@ pub enum Line {
     Camera(Camera),
     /// Sent about once a second to subscribers.
     Status(Status),
+    /// How a [`Request::Confirm`] ended.
+    Confirmed { answer: Answer },
+}
+
+/// How a nod-to-approve prompt ended. Only [`Answer::Approved`] lets a
+/// login through without the password.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Answer {
+    /// The person nodded.
+    Approved,
+    /// The person shook their head.
+    Denied,
+    /// Neither, before the time ran out.
+    Timeout,
+    /// The question could not be put: the tracker sees nobody, the banner
+    /// cannot be shown, or another prompt is already open.
+    Unavailable,
 }
 
 /// A head pose in the units the settings use.
@@ -220,6 +247,28 @@ mod tests {
         assert_eq!(game.as_deref(), Some("eurotrucks2.exe"));
         assert_eq!(profile.yaw.sensitivity, 2.0);
         assert_eq!(profile.pitch.sensitivity, 1.0);
+    }
+
+    #[test]
+    fn a_confirm_request_needs_no_fields_and_its_answer_is_one_word() {
+        assert_eq!(
+            serde_json::from_str::<Request>(r#"{"cmd":"confirm"}"#).unwrap(),
+            Request::Confirm { service: None }
+        );
+        assert_eq!(
+            serde_json::from_str::<Request>(r#"{"cmd":"confirm","service":"sudo"}"#).unwrap(),
+            Request::Confirm {
+                service: Some("sudo".into())
+            }
+        );
+        // The login helper matches on this exact text; it must not change.
+        assert_eq!(
+            serde_json::to_string(&Line::Confirmed {
+                answer: Answer::Approved
+            })
+            .unwrap(),
+            r#"{"type":"confirmed","answer":"approved"}"#
+        );
     }
 
     #[test]

@@ -11,6 +11,7 @@ readme = "../../README.md"
 summary = "Tobii Eye Tracker 5 head and eye tracking for games under Proton"
 assets = [
     { source = "target/release/opentobii", dest = "/usr/bin/opentobii", mode = "755" },
+    { source = "target/release/opentobii-confirm", dest = "/usr/libexec/opentobii-confirm", mode = "755" },
     { source = "../../packaging/opentobii.service", dest = "/usr/lib/systemd/user/opentobii.service", mode = "644" },
     { source = "../../packaging/opentobii.desktop", dest = "/usr/share/applications/opentobii.desktop", mode = "644" },
     { source = "../../packaging/opentobii.svg", dest = "/usr/share/icons/hicolor/scalable/apps/opentobii.svg", mode = "644" },
@@ -34,6 +35,7 @@ Includes a tuning window for smoothing, dead zone and sensitivity. \
 Needs the tobii-linux driver (tobiid) from Skyggedans."""
 assets = [
     ["target/release/opentobii", "usr/bin/", "755"],
+    ["target/release/opentobii-confirm", "usr/libexec/", "755"],
     ["../../packaging/opentobii.service", "usr/lib/systemd/user/", "644"],
     ["../../packaging/opentobii.desktop", "usr/share/applications/", "644"],
     ["../../packaging/opentobii.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
@@ -45,7 +47,7 @@ default = ["gui", "overlay"]
 # The tuning window. Without it the binary is the daemon and the command line.
 gui = ["dep:slint", "dep:slint-build", "dep:rfd"]
 # The on-screen gaze mark. Wayland with layer-shell only.
-overlay = ["dep:smithay-client-toolkit", "dep:wayland-client"]
+overlay = ["dep:smithay-client-toolkit", "dep:wayland-client", "dep:ab_glyph"]
 
 [dependencies]
 opentobii-core = { path = "../opentobii-core" }
@@ -60,7 +62,9 @@ rfd = { version = "0.18", optional = true }
 # The versions Slint's window backend already brings in, so nothing is built twice.
 smithay-client-toolkit = { version = "0.19", default-features = false, features = ["calloop"], optional = true }
 wayland-client = { version = "0.31", optional = true }
-rustix = { version = "1.1", features = ["event", "time"] }
+# Text for the nod prompt's banner. Also already in the tree.
+ab_glyph = { version = "0.2", optional = true }
+rustix = { version = "1.1", features = ["event", "process", "time"] }
 
 [dev-dependencies]
 minisign = "0.10"

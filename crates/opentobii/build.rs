@@ -1,3 +1,10 @@
+//! Builds the two helpers this program carries inside it.
+//!
+//! The login helper (`crates/opentobii-confirm`) is built with a second
+//! cargo into its own target folder under `OUT_DIR`, so that
+//! `opentobii login-helper install` needs nothing but this binary and an
+//! update brings the matching helper with it.
+//!
 //! Builds the Windows helper that goes into a game's prefix and embeds it in
 //! the binary, so `opentobii install` needs nothing but itself.
 //!
@@ -29,6 +36,7 @@ fn main() {
         .arg(&source)
         .args(["-lws2_32", "-lcfgmgr32", "-ladvapi32", "-static"])
         .status();
+    login_helper();
     match built {
         Ok(status) if status.success() => {}
         Ok(status) => panic!("{COMPILER} failed to build the helper: {status}"),
@@ -41,4 +49,38 @@ fn main() {
             std::fs::write(&out, b"").expect("OUT_DIR is writable");
         }
     }
+}
+
+fn login_helper() {
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../opentobii-confirm");
+    println!(
+        "cargo:rerun-if-changed={}",
+        source.join("src/main.rs").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        source.join("Cargo.toml").display()
+    );
+    let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
+    let target = out.join("login-helper-target");
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let status = Command::new(cargo)
+        .args(["build", "--release", "--locked", "-p", "opentobii-confirm"])
+        .arg("--target-dir")
+        .arg(&target)
+        .current_dir(&source)
+        // This build's own target folder and target must not leak into it.
+        .env_remove("CARGO_TARGET_DIR")
+        .env_remove("CARGO_BUILD_TARGET")
+        .status()
+        .expect("cargo runs to build the login helper");
+    assert!(
+        status.success(),
+        "building the login helper failed: {status}"
+    );
+    std::fs::copy(
+        target.join("release/opentobii-confirm"),
+        out.join("opentobii-confirm"),
+    )
+    .expect("the login helper was built");
 }

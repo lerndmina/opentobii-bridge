@@ -36,7 +36,43 @@ pub struct Config {
     pub overlay: Overlay,
     /// The infrared picture as a camera, for face login.
     pub camera: Camera,
+    /// The nod that approves a face login.
+    pub confirm: Confirm,
     pub updates: Updates,
+}
+
+/// The nod-to-approve prompt shown after a face match.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Confirm {
+    /// How long the prompt waits for a nod or a shake, seconds.
+    pub seconds: f32,
+}
+
+impl Confirm {
+    pub const MIN_SECONDS: f32 = 3.0;
+    pub const MAX_SECONDS: f32 = 60.0;
+
+    /// # Errors
+    /// When the wait is outside 3 to 60 seconds.
+    pub fn validate(&self) -> Result<(), String> {
+        if (Self::MIN_SECONDS..=Self::MAX_SECONDS).contains(&self.seconds) {
+            Ok(())
+        } else {
+            Err(format!(
+                "confirm.seconds is {}: it must be from {} to {}",
+                self.seconds,
+                Self::MIN_SECONDS,
+                Self::MAX_SECONDS
+            ))
+        }
+    }
+}
+
+impl Default for Confirm {
+    fn default() -> Self {
+        Self { seconds: 15.0 }
+    }
 }
 
 /// Whether the tuning window looks for new versions.
@@ -118,6 +154,7 @@ impl Config {
     pub fn validate(&self) -> Result<(), Error> {
         self.overlay.validate().map_err(Error::Invalid)?;
         self.camera.validate().map_err(Error::Invalid)?;
+        self.confirm.validate().map_err(Error::Invalid)?;
         self.default
             .validate()
             .map_err(|reason| Error::Invalid(format!("default profile: {reason}")))?;

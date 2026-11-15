@@ -48,6 +48,13 @@ opentobii: a Tobii Eye Tracker 5 for games under Proton
       Run the daemon in the background through your user's systemd, and
       choose whether it starts at login. With no word, show its state.
 
+  opentobii login-helper [install|remove]
+      For face login with Howdy: after your face is recognised, ask for a
+      nod before a sudo or system prompt is approved. `install` puts the
+      small program PAM runs at /usr/local/libexec/opentobii-confirm and
+      needs sudo. With no word, show whether it is there and the two lines
+      to put in the PAM files.
+
   opentobii gui
       Open the tuning window: dead zone, smoothing, sensitivity, recentre.
 
@@ -67,6 +74,7 @@ fn main() -> ExitCode {
         Some("uninstall") => uninstall(args),
         Some("status") => status(),
         Some("service") => service_command(args),
+        Some("login-helper") => login_helper(args),
         Some("setup") => setup(args),
         Some("update") => update_command(args),
         Some("remove") => remove(args),
@@ -78,6 +86,9 @@ fn main() -> ExitCode {
         Some("gui") => opentobii::gui::run(),
         #[cfg(feature = "overlay")]
         Some("overlay") => opentobii::overlay::run(),
+        // Run by the daemon for one nod prompt; not in the usage text.
+        #[cfg(feature = "overlay")]
+        Some("banner") => opentobii::banner::run(args),
         Some("help" | "--help" | "-h") => {
             print!("{USAGE}");
             Ok(())
@@ -400,6 +411,49 @@ fn remove(mut args: impl Iterator<Item = String>) -> CommandResult {
     Ok(())
 }
 
+/// This program's full path: sudo does not look in `~/.local/bin`.
+fn own_path() -> String {
+    std::env::current_exe().map_or_else(|_| "opentobii".into(), |exe| exe.display().to_string())
+}
+
+fn login_helper(mut args: impl Iterator<Item = String>) -> CommandResult {
+    use opentobii::login::{self, Installed};
+    match args.next().as_deref() {
+        Some("install") => {
+            let path = login::install()?;
+            println!("Wrote {}", path.display());
+        }
+        Some("remove") => {
+            if login::remove()? {
+                println!("Removed {}", login::SYSTEM_PATH);
+            } else {
+                println!("{} was not there", login::SYSTEM_PATH);
+            }
+            return Ok(());
+        }
+        Some(other) => return Err(format!("login-helper: unknown word `{other}`")),
+        None => {}
+    }
+    let installed = login::installed();
+    println!("Login helper: {}", login::describe(&installed));
+    match &installed {
+        Installed::Current(path) | Installed::Other(path) => {
+            if matches!(installed, Installed::Other(_)) {
+                println!("It works as it is. To bring it up to this version:");
+                println!("  sudo {} login-helper install", own_path());
+            }
+            println!(
+                "\nTo ask for a nod after a face match, these two lines replace the\n\
+                 `pam_howdy.so` line in /etc/pam.d/sudo and /etc/pam.d/polkit-1:\n"
+            );
+            print!("{}", login::pam_lines(path));
+        }
+        Installed::No => println!("To install it:\n  sudo {} login-helper install", own_path()),
+        Installed::Unsafe(_) => {}
+    }
+    Ok(())
+}
+
 fn service_command(mut args: impl Iterator<Item = String>) -> CommandResult {
     match args.next().as_deref() {
         Some("start") => service::start()?,
@@ -460,6 +514,10 @@ fn status() -> CommandResult {
     if !status.camera.is_empty() {
         println!("Face login camera:         {}", status.camera);
     }
+    println!(
+        "Nod to approve helper:     {}",
+        opentobii::login::describe(&opentobii::login::installed())
+    );
     match &status.settings_path {
         Some(path) => println!("Settings:                  {}", path.display()),
         None => println!("Settings:                  not saved to a file"),
