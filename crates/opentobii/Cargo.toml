@@ -43,7 +43,7 @@ assets = [
 [features]
 default = ["gui", "overlay"]
 # The tuning window. Without it the binary is the daemon and the command line.
-gui = ["dep:slint", "dep:slint-build"]
+gui = ["dep:slint", "dep:slint-build", "dep:rfd"]
 # The on-screen gaze mark. Wayland with layer-shell only.
 overlay = ["dep:smithay-client-toolkit", "dep:wayland-client"]
 
@@ -55,6 +55,8 @@ serde_json = "1.0"
 sha2 = "0.11"
 ureq = "3.5"
 slint = { version = "1.18", optional = true }
+# The desktop's own folder picker, through the XDG portal.
+rfd = { version = "0.18", optional = true }
 # The versions Slint's window backend already brings in, so nothing is built twice.
 smithay-client-toolkit = { version = "0.19", default-features = false, features = ["calloop"], optional = true }
 wayland-client = { version = "0.31", optional = true }

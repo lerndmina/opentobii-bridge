@@ -26,7 +26,7 @@ opentobii is not a USB driver. It builds on [Skyggedans/tobii-linux](https://git
 | System | Fedora 44, KDE Plasma 6.8 on Wayland |
 | Face login | Howdy 3.0.0 with v4l2loopback 0.15.4 |
 
-Other games that ship the same DLL should work the same way, and `opentobii games` lists the ones you have installed. None but ETS2 has been tried. See [Known gaps](#known-gaps).
+Other games that ship the same DLL should work the same way, and `opentobii games` lists the ones you have installed, in Steam or out of it. None but ETS2 has been tried. See [Known gaps](#known-gaps).
 
 ## Install
 
@@ -46,14 +46,18 @@ The release also carries an rpm, a deb and a tarball with an `install.sh`. A pac
 ## Set up a game
 
 1. Close the game.
-2. Open **opentobii** from the app menu. The Getting started list shows what is left to do, and the Games card lists your Steam games that can use the tracker. Press **Set up** beside the game.
+2. Open **opentobii** from the app menu. The Getting started list shows what is left to do, and the Games card lists the games that can use the tracker. Press **Set up** beside the game.
 3. Start the game. If it has an eye tracking switch in its options, turn it on. Euro Truck Simulator 2 does.
+
+The card lists Steam games that ship Tobii's DLL, and games outside Steam whose Wine prefix is in one of the usual places: `~/Games` (Lutris, Heroic, hand-made prefixes), Bottles and `~/.wine`. For a prefix anywhere else, press **Add a game folder…** and pick the folder that holds `drive_c`. Added folders are remembered in `~/.config/opentobii/games.txt`; **Forget** drops one from the list without touching it.
 
 From a terminal, the same thing is:
 
 ```sh
-opentobii games              # installed Steam games that ship Tobii's DLL
-opentobii install 227300     # by app id, part of the name, or a prefix path
+opentobii games                  # every game found that ships Tobii's DLL
+opentobii install 227300         # a Steam app id
+opentobii install citizen        # part of a name
+opentobii install ~/Games/star-citizen   # a prefix folder
 opentobii uninstall 227300
 ```
 

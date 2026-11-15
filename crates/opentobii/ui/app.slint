@@ -30,10 +30,14 @@ export struct CheckRow {
 
 export struct GameRow {
     name: string,
+    // Where a game outside Steam lives; empty for a Steam game.
+    place: string,
     state: string,
     // What the main button does: "Set up", "Update", or empty for none.
     action: string,
     removable: bool,
+    // An added folder that can be dropped from the list.
+    forgettable: bool,
     busy: bool,
 }
 
@@ -421,6 +425,7 @@ export component App inherits Window {
 
     in property <[GameRow]> games;
     in property <string> games-text;
+    in property <bool> game-adding;
 
     in property <bool> calibration-available;
     in property <string> calibration-text;
@@ -460,6 +465,8 @@ export component App inherits Window {
     callback service-autostart(bool);
     callback game-action(int);
     callback game-remove(int);
+    callback game-add();
+    callback game-forget(int);
     callback camera-toggled(bool);
     callback overlay-toggled(bool);
     callback overlay-style-selected(int);
@@ -838,13 +845,19 @@ export component App inherits Window {
                                     font-weight: 600;
                                     overflow: elide;
                                 }
+                                if game.place != "": Text {
+                                    text: game.place;
+                                    color: Theme.muted;
+                                    font-size: 11px;
+                                    overflow: elide;
+                                }
                                 Text {
                                     text: game.state;
                                     color: Theme.muted;
                                     font-size: 12px;
                                     wrap: word-wrap;
                                 }
-                                if game.action != "" || game.removable: HorizontalLayout {
+                                if game.action != "" || game.removable || game.forgettable: HorizontalLayout {
                                     spacing: 8px;
                                     if game.action != "": Button {
                                         text: game.action;
@@ -863,7 +876,21 @@ export component App inherits Window {
                                             root.game-remove(i);
                                         }
                                     }
+                                    if game.forgettable: Button {
+                                        text: "Forget";
+                                        horizontal-stretch: 1;
+                                        clicked => {
+                                            root.game-forget(i);
+                                        }
+                                    }
                                 }
+                            }
+                        }
+                        Button {
+                            text: root.game-adding ? "Choosing a folder…" : "Add a game folder…";
+                            enabled: !root.game-adding;
+                            clicked => {
+                                root.game-add();
                             }
                         }
                     }

@@ -15,7 +15,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::steam;
+use crate::games::{self, Source};
 use crate::{install, prefix, service, update};
 use opentobii_core::camera::Camera;
 use opentobii_core::config::Config;
@@ -80,6 +80,9 @@ enum Event {
     ServiceDone(Result<(), String>),
     /// The Steam games that can use the tracker, and their helpers.
     Games(Vec<GameInfo>),
+    /// The folder picker closed: `None` when nothing was picked, else
+    /// whether the folder could be added.
+    GameAdded(Option<Result<(), String>>),
     /// A set-up or removal finished for the game with this app id.
     GameDone(String, Result<(), String>),
 }
@@ -296,11 +299,13 @@ fn driver_present() -> bool {
 
 // --- games --------------------------------------------------------------------
 
-/// One Steam game that ships Tobii's DLL, and the helper in its prefix.
+/// One game that can use the tracker, and the helper in its prefix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GameInfo {
-    app_id: String,
+    /// A Steam app id, else the prefix's path.
+    id: String,
     name: String,
+    source: Source,
     prefix: std::path::PathBuf,
     /// `None` when the game has never been run, so it has no prefix yet.
     helper: Option<Result<prefix::Installed, String>>,
@@ -310,14 +315,18 @@ fn read_games() -> Vec<GameInfo> {
     let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) else {
         return Vec::new();
     };
-    steam::games(std::path::Path::new(&home))
+    let added = games::added_path()
+        .map(|file| games::load_added(&file))
+        .unwrap_or_default();
+    games::all(std::path::Path::new(&home), &added)
         .into_iter()
         .map(|game| GameInfo {
             helper: game
                 .prefix_exists
                 .then(|| prefix::status(&game.prefix).map_err(|err| err.to_string())),
-            app_id: game.app_id,
+            id: game.id,
             name: game.name,
+            source: game.source,
             prefix: game.prefix,
         })
         .collect()
@@ -354,10 +363,27 @@ fn game_row(game: &GameInfo, note: Option<&str>, busy: bool) -> GameRow {
     }
     GameRow {
         name: game.name.as_str().into(),
+        // A Steam game is known by its name; any other by where it is.
+        place: match game.source {
+            Source::Steam => "".into(),
+            Source::Found | Source::Added => short_path(&game.prefix).into(),
+        },
         state: state.into(),
         action: if running { "".into() } else { action.into() },
         removable: removable && !running,
+        // An added folder can be dropped from the list once nothing of
+        // ours is left in it.
+        forgettable: game.source == Source::Added && !removable && !busy,
         busy,
+    }
+}
+
+/// A path as a person writes it: `~` for the home folder.
+fn short_path(path: &std::path::Path) -> String {
+    let home = std::env::var_os("HOME").filter(|home| !home.is_empty());
+    match home.and_then(|home| path.strip_prefix(home).ok().map(std::path::Path::to_owned)) {
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
     }
 }
 
@@ -588,6 +614,8 @@ struct Ui {
     service: service::State,
     service_busy: bool,
     games: Vec<GameInfo>,
+    /// The folder picker is open.
+    adding_game: bool,
     /// App ids with a set-up or removal under way.
     games_busy: Vec<String>,
     /// The last result for a game, by app id, shown in place of its state.
@@ -929,14 +957,14 @@ impl Ui {
                 let note = self
                     .game_notes
                     .iter()
-                    .find(|(id, _)| *id == game.app_id)
+                    .find(|(id, _)| *id == game.id)
                     .map(|(_, note)| note.as_str());
-                game_row(game, note, self.games_busy.contains(&game.app_id))
+                game_row(game, note, self.games_busy.contains(&game.id))
             })
             .collect();
         self.app.set_games_text(
             if rows.is_empty() {
-                "No installed Steam game with Tobii support was found."
+                "No installed game with Tobii support was found. A game in an unusual place can be added below."
             } else {
                 ""
             }
@@ -953,16 +981,60 @@ impl Ui {
         }
     }
 
+    /// Ask for a folder and add the Wine prefix it belongs to.
+    fn add_game(&mut self) {
+        if self.adding_game {
+            return;
+        }
+        self.adding_game = true;
+        self.app.set_game_adding(true);
+        let events = self.events.clone();
+        thread::spawn(move || {
+            let mut dialog = rfd::FileDialog::new()
+                .set_title("Pick the game's Wine prefix: the folder with drive_c in it");
+            if let Some(home) = std::env::var_os("HOME") {
+                dialog = dialog.set_directory(home);
+            }
+            // `None` is the user closing the dialog: nothing to say.
+            let added = dialog.pick_folder().map(|picked| {
+                let file = games::added_path().ok_or("HOME is not set")?;
+                games::add(&file, &picked).map(|_| ())
+            });
+            let _ = events.send(Event::GameAdded(added));
+            let _ = events.send(Event::Games(read_games()));
+        });
+    }
+
+    /// Drop an added folder from the list. The folder is not touched.
+    fn forget_game(&mut self, index: usize) {
+        let Some(game) = self.games.get(index).cloned() else {
+            return;
+        };
+        if game.source != Source::Added {
+            return;
+        }
+        let events = self.events.clone();
+        thread::spawn(move || {
+            let result = games::added_path()
+                .ok_or_else(|| "HOME is not set".to_owned())
+                .and_then(|file| games::forget(&file, &game.prefix));
+            if let Err(reason) = result {
+                let _ = events.send(Event::Failed(reason));
+            }
+            let _ = events.send(Event::Games(read_games()));
+        });
+    }
+
     /// Set up or remove the helper for the game in row `index`.
     fn change_game(&mut self, index: usize, remove: bool) {
         let Some(game) = self.games.get(index).cloned() else {
             return;
         };
-        if self.games_busy.contains(&game.app_id) {
+        if self.games_busy.contains(&game.id) {
             return;
         }
-        self.games_busy.push(game.app_id.clone());
-        self.game_notes.retain(|(id, _)| *id != game.app_id);
+        self.games_busy.push(game.id.clone());
+        self.game_notes.retain(|(id, _)| *id != game.id);
         self.refresh_games();
         let events = self.events.clone();
         thread::spawn(move || {
@@ -972,7 +1044,7 @@ impl Ui {
                 prefix::install(&game.prefix, prefix::HELPER).map(|_| ())
             };
             let _ = events.send(Event::GameDone(
-                game.app_id,
+                game.id,
                 result.map_err(|err| err.to_string()),
             ));
             let _ = events.send(Event::Games(read_games()));
@@ -1238,6 +1310,14 @@ impl Ui {
                 self.refresh_games();
                 self.refresh_checklist();
             }
+            Event::GameAdded(added) => {
+                self.adding_game = false;
+                self.app.set_game_adding(false);
+                if let Some(Err(reason)) = added {
+                    self.failure = Some(reason);
+                    self.refresh_chrome();
+                }
+            }
             Event::GameDone(app_id, result) => {
                 self.games_busy.retain(|id| *id != app_id);
                 if let Err(reason) = result {
@@ -1482,6 +1562,7 @@ pub fn run() -> Result<(), String> {
         service: service::State::default(),
         service_busy: false,
         games: Vec::new(),
+        adding_game: false,
         games_busy: Vec::new(),
         game_notes: Vec::new(),
         game_rows: Rc::clone(&game_rows),
@@ -1738,6 +1819,22 @@ pub fn run() -> Result<(), String> {
             }
         }
     });
+    app.on_game_add({
+        let ui = Rc::clone(&ui);
+        move || {
+            if let Ok(mut ui) = ui.try_borrow_mut() {
+                ui.add_game();
+            }
+        }
+    });
+    app.on_game_forget({
+        let ui = Rc::clone(&ui);
+        move |index| {
+            if let (Ok(mut ui), Ok(index)) = (ui.try_borrow_mut(), usize::try_from(index)) {
+                ui.forget_game(index);
+            }
+        }
+    });
     app.on_game_action({
         let ui = Rc::clone(&ui);
         move |index| {
@@ -1826,6 +1923,16 @@ pub fn run() -> Result<(), String> {
     // a path, save the window there as a PPM image after a moment and quit.
     let snapshot = Timer::default();
     if let Some(path) = std::env::var_os("OPENTOBII_GUI_SNAPSHOT") {
+        // A taller window shows the cards below the fold:
+        // OPENTOBII_GUI_SNAPSHOT_HEIGHT, in pixels.
+        if let Some(height) = std::env::var("OPENTOBII_GUI_SNAPSHOT_HEIGHT")
+            .ok()
+            .and_then(|text| text.parse::<u32>().ok())
+        {
+            let width = app.window().size().width.max(1040);
+            app.window()
+                .set_size(slint::PhysicalSize::new(width, height));
+        }
         let app = app.clone_strong();
         snapshot.start(
             TimerMode::SingleShot,
@@ -1867,8 +1974,9 @@ mod tests {
 
     fn game(helper: Option<Result<prefix::Installed, String>>) -> GameInfo {
         GameInfo {
-            app_id: "227300".into(),
+            id: "227300".into(),
             name: "Euro Truck Simulator 2".into(),
+            source: Source::Steam,
             prefix: "/pfx".into(),
             helper,
         }

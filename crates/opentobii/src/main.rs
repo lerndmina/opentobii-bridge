@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use std::thread;
 use std::time::Duration;
 
-use opentobii::steam::{self, Game};
+use opentobii::games::{self, Game, Source};
 use opentobii::{install, prefix, service, start, update, Config};
 use opentobii_core::control::{self, Line, Request};
 
@@ -168,9 +168,10 @@ fn describe(installed: Result<prefix::Installed, prefix::Error>) -> String {
 }
 
 fn games() -> CommandResult {
-    let found = steam::games(&home()?);
+    let found = all_games()?;
     if found.is_empty() {
-        println!("No installed Steam game with Tobii's game integration DLL was found.");
+        println!("No installed game with Tobii's game integration DLL was found.");
+        println!("For a game in a Wine prefix somewhere unusual: opentobii install PREFIX");
         return Ok(());
     }
     for game in found {
@@ -179,9 +180,25 @@ fn games() -> CommandResult {
         } else {
             "no prefix yet: run the game once first".to_owned()
         };
-        println!("{:>8}  {}  ({state})", game.app_id, game.name);
+        match game.source {
+            Source::Steam => println!("{:>8}  {}  ({state})", game.id, game.name),
+            // A game outside Steam has no number: it is named by its prefix.
+            _ => println!(
+                "{:>8}  {}  ({state})\n          {}",
+                "-", game.name, game.id
+            ),
+        }
     }
     Ok(())
+}
+
+/// Every game that can use the tracker: Steam's, the ones found in other
+/// launchers' prefixes, and the ones added in the tuning window.
+fn all_games() -> Result<Vec<Game>, String> {
+    let added = games::added_path()
+        .map(|file| games::load_added(&file))
+        .unwrap_or_default();
+    Ok(games::all(&home()?, &added))
 }
 
 /// Turn what the user typed into a prefix folder and a name for it.
@@ -192,8 +209,8 @@ fn resolve(wanted: &str) -> Result<(PathBuf, String), String> {
             return Ok((candidate.clone(), candidate.display().to_string()));
         }
     }
-    let found = steam::games(&home()?);
-    match steam::find(&found, wanted) {
+    let found = all_games()?;
+    match games::find(&found, wanted) {
         Ok(Game {
             prefix_exists: false,
             name,
@@ -208,7 +225,7 @@ fn resolve(wanted: &str) -> Result<(PathBuf, String), String> {
         Err(matches) => {
             let names: Vec<String> = matches
                 .iter()
-                .map(|game| format!("{} ({})", game.name, game.app_id))
+                .map(|game| format!("{} ({})", game.name, game.id))
                 .collect();
             Err(format!(
                 "`{wanted}` matches more than one game: {}",

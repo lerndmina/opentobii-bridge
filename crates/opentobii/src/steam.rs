@@ -73,7 +73,9 @@ pub fn library_paths(vdf: &str) -> Vec<PathBuf> {
         .collect()
 }
 
-fn find_dll(folder: &Path, depth: usize) -> Option<PathBuf> {
+/// Tobii's DLL at or under `folder`, no more than `depth` folders down.
+#[must_use]
+pub fn find_dll(folder: &Path, depth: usize) -> Option<PathBuf> {
     let entries = std::fs::read_dir(folder).ok()?;
     let mut folders = Vec::new();
     for entry in entries.flatten() {
