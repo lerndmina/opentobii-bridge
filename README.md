@@ -55,7 +55,7 @@ The tuning window's Gaze overlay card switches on a mark that shows where you ar
 
 ## Face login camera (experimental)
 
-The tracker films you in infrared to find your eyes. The daemon can publish that picture as a webcam, so a face login program such as [Howdy](https://github.com/boltgolt/howdy) can use the tracker instead of a laptop's IR camera. The feed is tested against v4l2loopback 0.15.4; Howdy itself has not been tried with it yet.
+The tracker films you in infrared to find your eyes. The daemon can publish that picture as a webcam, so a face login program such as [Howdy](https://github.com/boltgolt/howdy) can use the tracker instead of a laptop's IR camera. Tested with v4l2loopback 0.15.4 and Howdy 3.0.0 on Fedora 44: `howdy test` recognises a face from it.
 
 It needs the `v4l2loopback` kernel module, with one device set aside for it. On Fedora, with RPM Fusion enabled:
 
@@ -75,6 +75,15 @@ device = "/dev/video10"
 ```
 
 `opentobii status` says what the camera is doing. The picture is 560 by 560, grey, enlarged from the tracker's 280 by 280 with its brightness stretched.
+
+For Howdy, set two values in `/etc/howdy/config.ini`:
+
+```ini
+device_path = /dev/video10
+dark_threshold = 90
+```
+
+The picture is a lit face on a dark room, so about half of it is near black, close to Howdy's default limit of 60% for skipping a frame as unlit. That rule is for cameras whose infrared light flashes; the tracker's is steady. On Fedora 44 the `principis/howdy-beta` COPR does not install; `starfish/howdy-beta` does.
 
 The daemon asks the driver for pictures only while some program has the camera open and streaming, so nothing is published between logins. Any program allowed to open cameras can read the device while it is switched on.
 
