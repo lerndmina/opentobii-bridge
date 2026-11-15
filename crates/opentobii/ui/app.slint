@@ -457,6 +457,7 @@ export component App inherits Window {
     callback create-profile();
     callback delete-profile();
     callback reset-profile();
+    callback match-windows();
     callback recentre();
     callback calibrate();
     callback checklist-action(int);
@@ -757,6 +758,18 @@ export component App inherits Window {
                             clicked => {
                                 root.create-profile();
                             }
+                        }
+                        Button {
+                            text: "Match Windows";
+                            clicked => {
+                                root.match-windows();
+                            }
+                        }
+                        Text {
+                            text: "No extra smoothing, dead zone or curve, and turns scaled to what Tobii's Windows software reports.";
+                            color: Theme.muted;
+                            font-size: 12px;
+                            wrap: word-wrap;
                         }
                         HorizontalLayout {
                             spacing: 8px;

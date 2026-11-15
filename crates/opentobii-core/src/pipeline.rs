@@ -152,7 +152,53 @@ pub struct Profile {
     pub neutral: Neutral,
 }
 
+/// How much further the driver's yaw turns than Tobii's own software on
+/// Windows reports for the same head turn. The driver (tobii-linux) scales
+/// its angles to a laser-measured turn, which Tobii's under-read; these are
+/// the gains it ships (`HeadParams::FITTED`, `tools/headpose/README.md`).
+pub const DRIVER_YAW_GAIN: f64 = 1.2492;
+/// As [`DRIVER_YAW_GAIN`], for pitch.
+pub const DRIVER_PITCH_GAIN: f64 = 0.9126;
+
 impl Profile {
+    /// The profile that hands a game what it would be given on Windows.
+    ///
+    /// The driver already filters its head pose as Tobii's DLL does, so
+    /// nothing is smoothed again here, and there is no dead zone or curve:
+    /// Windows adds none between the tracker and the game. The only thing
+    /// undone is the driver's rotation gain, so that a head turn moves the
+    /// view as far as it does on Windows. `neutral` is kept: where straight
+    /// ahead is belongs to the person, not to the preset.
+    #[must_use]
+    pub fn like_windows(neutral: Neutral) -> Self {
+        let plain = Axis {
+            dead_zone: 0.0,
+            sensitivity: 1.0,
+            curve: 1.0,
+            invert: false,
+            limit: 0.0,
+        };
+        Self {
+            smoothing: Smoothing {
+                enabled: false,
+                ..Smoothing::default()
+            },
+            pitch: Axis {
+                sensitivity: 1.0 / DRIVER_PITCH_GAIN,
+                ..plain
+            },
+            yaw: Axis {
+                sensitivity: 1.0 / DRIVER_YAW_GAIN,
+                ..plain
+            },
+            roll: plain,
+            x: plain,
+            y: plain,
+            z: plain,
+            neutral,
+        }
+    }
+
     fn rotation_axes(&self) -> [Axis; 3] {
         [self.pitch, self.yaw, self.roll]
     }
@@ -291,6 +337,40 @@ impl Pipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_windows_preset_undoes_the_drivers_gain_and_adds_nothing_else() {
+        let neutral = Neutral {
+            rotation: [1.0, 2.0, 3.0],
+            ..Neutral::default()
+        };
+        let profile = Profile::like_windows(neutral);
+        assert_eq!(profile.validate(), Ok(()));
+        assert_eq!(profile.neutral, neutral, "straight ahead is kept");
+        assert!(!profile.smoothing.enabled);
+        // The driver's gain times the preset's sensitivity is 1: the game
+        // sees the angle Tobii's own software would have reported.
+        assert!((profile.yaw.sensitivity * DRIVER_YAW_GAIN - 1.0).abs() < 1e-12);
+        assert!((profile.pitch.sensitivity * DRIVER_PITCH_GAIN - 1.0).abs() < 1e-12);
+        assert!((profile.yaw.sensitivity - 0.8005).abs() < 1e-4);
+        assert!((profile.pitch.sensitivity - 1.0958).abs() < 1e-4);
+        for axis in [profile.roll, profile.x, profile.y, profile.z] {
+            assert_eq!(axis.sensitivity, 1.0);
+        }
+        for axis in [
+            profile.pitch,
+            profile.yaw,
+            profile.roll,
+            profile.x,
+            profile.y,
+            profile.z,
+        ] {
+            assert_eq!(
+                (axis.dead_zone, axis.curve, axis.invert, axis.limit),
+                (0.0, 1.0, false, 0.0)
+            );
+        }
+    }
 
     const DT: i64 = 30_200;
 

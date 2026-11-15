@@ -2,6 +2,10 @@
 
 The release workflow publishes the section for the version being released as that release's notes, and the tuning window shows its first lines in the update banner.
 
+## 0.3.2
+
+- "Match Windows" in the Profile card sets a profile to hand the game what it gets on Windows: no extra smoothing, dead zone or curve, with yaw scaled by 0.80 and pitch by 1.10. The driver already smooths head pose as Tobii's software does, so opentobii's own smoothing on top made the view feel damped.
+
 ## 0.3.1
 
 - The tracker sleeps when nothing is using it, and its infrared lights go out. It wakes in under a tenth of a second for a game, the tuning window, the gaze overlay, face login or a nod prompt. Before, the lights stayed on for as long as the daemon ran.

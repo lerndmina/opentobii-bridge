@@ -1670,6 +1670,14 @@ pub fn run() -> Result<(), String> {
             });
         }
     });
+    app.on_match_windows({
+        let ui = Rc::clone(&ui);
+        move || {
+            edit(&ui, &|profile| {
+                *profile = Profile::like_windows(profile.neutral)
+            });
+        }
+    });
     app.on_reset_profile({
         let ui = Rc::clone(&ui);
         move || {

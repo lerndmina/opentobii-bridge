@@ -71,6 +71,7 @@ The window shows what the tracker sees against what is sent to the game, and edi
 - **Smoothing** steadies the view. More steadiness means more lag when you stop moving; "Fast turns" keeps quick movements responsive.
 - **Turning and leaning** have, per axis, a dead zone, sensitivity, curve, limit and invert.
 - **Profiles**: one default, and one per game if you make it. A game with no profile of its own uses the default.
+- **Match Windows** sets the selected profile to hand the game what it would be given on Windows. The driver already filters head pose the way Tobii's own software does, so this turns opentobii's smoothing off and removes the dead zone and curve. It also scales yaw by 0.80 and pitch by 1.10, because the driver reports a head turn at its true size, where Tobii's software reports yaw smaller and pitch larger, and games were tuned on that. If the view shimmers at rest, switch smoothing back on with a high steadiness such as 4 to 5 Hz.
 - **Calibration** runs the driver's `tobii-calibrate` on the monitor you pick.
 - **Daemon** starts, stops and restarts the background service, and sets whether it starts at login.
 
