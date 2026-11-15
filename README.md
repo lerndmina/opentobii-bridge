@@ -85,6 +85,17 @@ dark_threshold = 90
 
 The picture is a lit face on a dark room, so about half of it is near black, close to Howdy's default limit of 60% for skipping a frame as unlit. That rule is for cameras whose infrared light flashes; the tracker's is steady. On Fedora 44 the `principis/howdy-beta` COPR does not install; `starfish/howdy-beta` does.
 
+After `sudo howdy add` and a `sudo howdy test` that recognises you, add Howdy where you want face unlock. Each is one line, and the password keeps working as the fallback:
+
+```bash
+# sudo
+sudo sed -i '1a auth       sufficient   pam_howdy.so' /etc/pam.d/sudo
+# the KDE lock screen: press Enter on the empty password box to start the scan
+sudo sed -i '1i auth        sufficient    pam_howdy.so' /etc/pam.d/kde
+```
+
+Both are tested on Fedora 44 with Plasma 6.8. The login screen at boot is not set up here: the tracker and the camera are only opened to whoever is logged in at the desk, the login manager runs confined by SELinux, and a face login leaves the KDE wallet locked, since the wallet is unlocked by the password typed at login.
+
 The daemon asks the driver for pictures only while some program has the camera open and streaming, so nothing is published between logins. Any program allowed to open cameras can read the device while it is switched on.
 
 ## The daemon
