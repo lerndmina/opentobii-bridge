@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use opentobii_core::config::game_key;
 use opentobii_core::control::{GameStatus, GazePoint, Line, RawPose, Request, Status};
 
-use super::{confirm, effective, spawn, Shared, State};
+use super::{confirm, effective, power, spawn, Shared, State};
 
 /// Longest request line accepted. A whole profile is under 2 kB.
 const MAX_LINE: u64 = 64 * 1024;
@@ -183,7 +183,20 @@ fn handle(shared: &Shared, request: Request, watcher: &Arc<Watcher>) -> Line {
             if !state.watchers.iter().any(|w| w.id == watcher.id) {
                 state.watchers.push(Arc::clone(watcher));
             }
+            // A subscriber wants live data: do not wait for the next tick.
+            power::wake(shared);
             Line::Ok
+        }
+        Request::SetTracker { tracker } => {
+            if let Err(reason) = tracker.validate() {
+                return refuse(reason);
+            }
+            // The power thread sees the change within half a second.
+            state.tuning.tracker = tracker;
+            let watchers = state.watchers.clone();
+            let problem = apply(shared, state);
+            broadcast_locked(state, &watchers, &Line::Tracker(tracker));
+            problem.unwrap_or(Line::Ok)
         }
         Request::SetProfile { game, profile } => {
             if let Err(reason) = profile.validate() {
@@ -271,6 +284,7 @@ fn status(shared: &Shared, state: &State) -> Status {
         games,
         settings_path: shared.config.settings_path.clone(),
         camera: state.camera_status.clone(),
+        tracker: power::describe(shared, state),
     }
 }
 

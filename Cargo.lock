@@ -3335,7 +3335,7 @@ dependencies = [
 
 [[package]]
 name = "opentobii"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "ab_glyph",
  "minisign",
@@ -3355,14 +3355,14 @@ dependencies = [
 
 [[package]]
 name = "opentobii-confirm"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "nix",
 ]
 
 [[package]]
 name = "opentobii-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3371,11 +3371,11 @@ dependencies = [
 
 [[package]]
 name = "opentobii-proto"
-version = "0.3.0"
+version = "0.3.1"
 
 [[package]]
 name = "opentobii-sign"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "minisign",
 ]

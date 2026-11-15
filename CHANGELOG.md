@@ -2,6 +2,12 @@
 
 The release workflow publishes the section for the version being released as that release's notes, and the tuning window shows its first lines in the update banner.
 
+## 0.3.1
+
+- The tracker sleeps when nothing is using it, and its infrared lights go out. It wakes in under a tenth of a second for a game, the tuning window, the gaze overlay, face login or a nod prompt. Before, the lights stayed on for as long as the daemon ran.
+- A "Tracker lights" switch in the tuning window turns this off, for use alongside other tracker programs. `[tracker]` in the settings file holds the switch and the 20-second wait.
+- `opentobii status` says whether the tracker is awake.
+
 ## 0.3.0
 
 - Nod to approve: after Howdy recognises your face on a sudo prompt or a system "Authentication Required" dialog, a banner asks for a nod. A nod approves, a head shake denies, and no answer in 15 seconds falls back to the password. The tracker's head pose decides.

@@ -24,6 +24,7 @@ use crate::recorded;
 mod camera;
 mod confirm;
 mod control;
+mod power;
 
 pub const TTP_PORT: u16 = 4455;
 pub const RELAY_PORT: u16 = 47455;
@@ -78,6 +79,9 @@ pub struct Config {
     /// Show the banner while a nod is being asked for. Without it nothing
     /// tells the person to nod, so only tests switch it off.
     pub confirm_banner: bool,
+    /// How long the tracker stays awake after its last use, in place of the
+    /// setting. Tests use it to avoid waiting the setting's shortest time.
+    pub idle_after: Option<Duration>,
 }
 
 impl Default for Config {
@@ -93,6 +97,7 @@ impl Default for Config {
             manage_overlay: true,
             monitor_index: None,
             confirm_banner: true,
+            idle_after: None,
         }
     }
 }
@@ -209,6 +214,15 @@ struct Shared {
     overlay_retry: std::sync::atomic::AtomicBool,
     /// A nod is being asked for; a second prompt is refused meanwhile.
     confirming: std::sync::atomic::AtomicBool,
+    /// Open connections from games and their helpers.
+    game_conns: std::sync::atomic::AtomicU32,
+    /// A program is reading the face login camera.
+    camera_reading: std::sync::atomic::AtomicBool,
+    /// The tracker has been paused. The details are in `power`.
+    asleep: std::sync::atomic::AtomicBool,
+    power: Mutex<power::Power>,
+    /// The daemon's driver connection, for the requests `power` sends.
+    driver_writer: Mutex<Option<UnixStream>>,
 }
 
 impl Shared {
@@ -320,6 +334,11 @@ pub fn start(config: Config) -> io::Result<Running> {
         stats: Stats::default(),
         overlay_retry: std::sync::atomic::AtomicBool::new(false),
         confirming: std::sync::atomic::AtomicBool::new(false),
+        game_conns: std::sync::atomic::AtomicU32::new(0),
+        camera_reading: std::sync::atomic::AtomicBool::new(false),
+        asleep: std::sync::atomic::AtomicBool::new(false),
+        power: Mutex::new(power::Power::default()),
+        driver_writer: Mutex::new(None),
         next_conn: AtomicU64::new(1),
         started: Instant::now(),
         config,
@@ -351,6 +370,7 @@ pub fn start(config: Config) -> io::Result<Running> {
         }
     }
     spawn("camera", Arc::clone(&shared), camera::run);
+    spawn("power", Arc::clone(&shared), power::run);
     spawn("tobiid", shared, follow_driver);
     Ok(running)
 }
@@ -374,7 +394,12 @@ fn accept(
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => spawn(name, Arc::clone(&shared), move |shared| {
-                if let Err(err) = serve(&shared, stream) {
+                // A game is there for as long as it holds a connection.
+                shared.game_conns.fetch_add(1, Ordering::AcqRel);
+                power::wake(&shared);
+                let ended = serve(&shared, stream);
+                shared.game_conns.fetch_sub(1, Ordering::AcqRel);
+                if let Err(err) = ended {
                     if err.kind() != io::ErrorKind::UnexpectedEof {
                         shared.log(&format!("{name}: connection ended: {err}"));
                     }
@@ -738,6 +763,7 @@ fn follow_driver(shared: Arc<Shared>) {
                 shared.log(&format!("tobiid: connected to {}", path.display()));
                 shared.lock().driver_connected = true;
                 let ended = driver_loop(&shared, stream);
+                power::disconnected(&shared);
                 shared.lock().driver_connected = false;
                 if let Err(err) = ended {
                     shared.log(&format!("tobiid: connection ended: {err}"));
@@ -757,6 +783,7 @@ fn follow_driver(shared: Arc<Shared>) {
 }
 
 fn driver_loop(shared: &Shared, mut stream: UnixStream) -> io::Result<()> {
+    power::connected(shared, &stream)?;
     stream.write_all(&driver::frame(&driver::subscribe(DRIVER_STREAMS)))?;
     stream.write_all(&driver::frame(&driver::request(
         AREA_REQUEST_ID,
@@ -792,6 +819,9 @@ fn driver_loop(shared: &Shared, mut stream: UnixStream) -> io::Result<()> {
                     if !std::mem::replace(&mut seen_pose, true) {
                         shared.log("tobiid: first head pose");
                     }
+                    if shared.asleep.load(Ordering::Acquire) {
+                        power::pose_while_asleep(shared);
+                    }
                     on_pose(shared, &pose);
                 }
                 Some(ServerMsg::Presence {
@@ -812,6 +842,15 @@ fn driver_loop(shared: &Shared, mut stream: UnixStream) -> io::Result<()> {
                     let again =
                         driver::request(AREA_REQUEST_ID, driver::KIND_DISPLAY_AREA_GET, &[]);
                     stream.write_all(&driver::frame(&again))?;
+                }
+                Some(ServerMsg::Reply {
+                    request_id: request_id @ (power::PAUSE_REQUEST_ID | power::RESUME_REQUEST_ID),
+                    status,
+                    ..
+                }) => {
+                    if status != driver::STATUS_OK {
+                        power::refused(shared, request_id, status);
+                    }
                 }
                 Some(ServerMsg::Reply { .. }) | None => {}
             }

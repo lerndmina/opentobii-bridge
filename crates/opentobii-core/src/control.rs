@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::camera::Camera;
-use crate::config::Config;
+use crate::config::{Config, Tracker};
 use crate::overlay::Overlay;
 use crate::pipeline::{Neutral, Profile};
 
@@ -67,6 +67,9 @@ pub enum Request {
         #[serde(default)]
         gaze: bool,
     },
+    /// Replace the tracker's sleep settings. Subscribers are sent
+    /// [`Line::Tracker`].
+    SetTracker { tracker: Tracker },
     /// Ask the person at the screen to nod (yes) or shake their head (no).
     /// The daemon shows a banner and answers with [`Line::Confirmed`] when
     /// it has an answer or the time in the settings has run out. Sent by
@@ -107,6 +110,8 @@ pub enum Line {
     Camera(Camera),
     /// Sent about once a second to subscribers.
     Status(Status),
+    /// The tracker's sleep settings changed.
+    Tracker(Tracker),
     /// How a [`Request::Confirm`] ended.
     Confirmed { answer: Answer },
 }
@@ -171,6 +176,10 @@ pub struct Status {
     /// older than the camera.
     #[serde(default)]
     pub camera: String,
+    /// Whether the tracker is awake, in words; empty from a daemon older
+    /// than the sleep setting.
+    #[serde(default)]
+    pub tracker: String,
 }
 
 /// One connected game process.

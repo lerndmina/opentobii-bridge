@@ -30,6 +30,10 @@ pub const STREAM_GAZE_RAW: u32 = 1 << 8;
 pub const STREAM_HEAD_POSE: u32 = 1 << 9;
 
 pub const KIND_DISPLAY_AREA_GET: u8 = 3;
+/// Pause or resume the tracker: one payload byte, 1 to pause, 0 to resume.
+/// A paused tracker sends nothing and its infrared lights are off. The
+/// driver ends a pause when the client that asked for it disconnects.
+pub const KIND_PAUSE: u8 = 0x0a;
 pub const STATUS_OK: u8 = 0;
 
 pub const PRESENCE_UNKNOWN: u8 = 0;
@@ -89,6 +93,12 @@ pub fn subscribe(streams: u32) -> Vec<u8> {
     let mut body = vec![TAG_SUBSCRIBE];
     body.extend_from_slice(&streams.to_le_bytes());
     body
+}
+
+/// REQUEST body that pauses the tracker, or resumes it.
+#[must_use]
+pub fn pause(request_id: u32, paused: bool) -> Vec<u8> {
+    request(request_id, KIND_PAUSE, &[u8::from(paused)])
 }
 
 /// REQUEST body.
@@ -496,6 +506,9 @@ mod tests {
             [1, 0, 3, 0, 0]
         );
         assert_eq!(request(7, KIND_DISPLAY_AREA_GET, &[]), [3, 7, 0, 0, 0, 3]);
+        // As the driver's own library sends them, captured on 2026-11-15.
+        assert_eq!(pause(1, true), [0x03, 1, 0, 0, 0, 0x0a, 0x01]);
+        assert_eq!(pause(2, false), [0x03, 2, 0, 0, 0, 0x0a, 0x00]);
     }
 
     #[test]

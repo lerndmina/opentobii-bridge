@@ -148,6 +148,14 @@ What it is for: a prompt you did not expect is not approved just because you wer
 
 The wait is `[confirm] seconds` in the settings file, from 3 to 60.
 
+## Tracker lights
+
+The tracker's infrared lights are on whenever it is tracking. opentobii puts the tracker to sleep once nothing has used it for 20 seconds, and the lights go out. It wakes in under a tenth of a second when a game connects, the tuning window or gaze overlay opens, a program reads the face login camera, or a nod prompt appears, so nothing waits for it.
+
+While it sleeps, other programs that read the driver directly get no data, and `tobii-calibrate` cannot start a calibration. Open the tuning window first, which keeps the tracker awake, or switch **Tracker lights** off in the window. `opentobii status` says whether the tracker is awake.
+
+If the daemon stops, the driver wakes the tracker by itself.
+
 ## Updating
 
 A copy installed with `setup` updates itself. The window looks for a newer release when it opens and every hour after, and shows a banner with an **Update** button; its About box has a **Check for updates** button. From a terminal:
@@ -223,6 +231,10 @@ device = "/dev/video10"
 
 [confirm]
 seconds = 15.0
+
+[tracker]
+sleep_when_idle = true
+idle_seconds = 20.0
 ```
 
 A game is named by its executable's file name in lower case. Each axis (`pitch`, `yaw`, `roll`, `x`, `y`, `z`) has `dead_zone`, `sensitivity`, `curve`, `invert` and `limit`; `[default.smoothing]` holds the filter settings.
@@ -240,6 +252,7 @@ The daemon listens on `$XDG_RUNTIME_DIR/opentobii.sock`, one JSON object per lin
 | `{"cmd":"set_overlay","overlay":{...}}` | Replaces the overlay's settings |
 | `{"cmd":"set_camera","camera":{...}}` | Replaces the camera's settings |
 | `{"cmd":"subscribe","poses":true,"gaze":false}` | Streams head poses, gaze points and a status line every second |
+| `{"cmd":"set_tracker","tracker":{...}}` | Replaces the tracker's sleep settings |
 | `{"cmd":"confirm","service":"sudo"}` | Shows the nod banner and answers `approved`, `denied`, `timeout` or `unavailable` |
 
 Changes apply at once and are saved to the settings file.

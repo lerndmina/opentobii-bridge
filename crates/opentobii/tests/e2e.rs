@@ -53,6 +53,11 @@ fn unsmoothed() -> Tuning {
 }
 
 fn rig(tuning: Tuning) -> Rig {
+    rig_with(tuning, None)
+}
+
+/// As [`rig`], with the tracker put to sleep after `idle_after` unused.
+fn rig_with(tuning: Tuning, idle_after: Option<Duration>) -> Rig {
     static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("opentobii-e2e-{}-{n}", std::process::id()));
@@ -86,6 +91,7 @@ fn rig(tuning: Tuning) -> Rig {
         monitor_index: None,
         manage_overlay: false,
         confirm_banner: false,
+        idle_after,
     })
     .unwrap();
     let (driver, greeting) = rx
@@ -768,6 +774,7 @@ fn a_second_daemon_on_the_same_control_socket_does_not_start() {
         monitor_index: None,
         manage_overlay: false,
         confirm_banner: false,
+        idle_after: None,
     });
     let err = second.expect_err("the socket is taken");
     assert!(
@@ -1004,4 +1011,140 @@ fn a_cancelled_dialog_ends_its_prompt() {
     let mut control = ask_for_a_nod(&mut rig);
     gesture(&mut rig, true);
     assert_eq!(control.line(), confirmed(Answer::Approved));
+}
+
+// --- putting the tracker to sleep ---------------------------------------------
+
+const IDLE: Duration = Duration::from_millis(300);
+
+fn sleepy() -> Rig {
+    rig_with(Tuning::default(), Some(IDLE))
+}
+
+/// The next request the daemon sends the driver, or `None` if it sends none
+/// within `wait`.
+fn driver_request(rig: &mut Rig, wait: Duration) -> Option<Vec<u8>> {
+    rig.driver.set_read_timeout(Some(wait)).unwrap();
+    let mut length = [0u8; 4];
+    rig.driver.read_exact(&mut length).ok()?;
+    let mut body = vec![0u8; u32::from_le_bytes(length) as usize];
+    rig.driver.read_exact(&mut body).unwrap();
+    Some(body)
+}
+
+fn expect_pause(rig: &mut Rig) {
+    assert_eq!(
+        driver_request(rig, TIMEOUT),
+        Some(tobiid::pause(2, true)),
+        "the daemon pauses the tracker"
+    );
+}
+
+fn expect_resume(rig: &mut Rig) {
+    assert_eq!(
+        driver_request(rig, TIMEOUT),
+        Some(tobiid::pause(3, false)),
+        "the daemon resumes the tracker"
+    );
+}
+
+fn tracker_status(rig: &Rig) -> String {
+    let Line::State { status, .. } = Control::connect(rig).ask(&Request::Get) else {
+        panic!("a state line")
+    };
+    status.tracker
+}
+
+#[test]
+fn an_unused_tracker_is_paused_and_a_subscriber_wakes_it() {
+    let mut rig = sleepy();
+    expect_pause(&mut rig);
+    // Asking for the status is not using the tracker.
+    assert_eq!(tracker_status(&rig), "Asleep: nothing is using it");
+    assert_eq!(driver_request(&mut rig, Duration::from_millis(700)), None);
+
+    let mut window = Control::connect(&rig);
+    assert_eq!(
+        window.ask(&Request::Subscribe {
+            poses: true,
+            gaze: false,
+        }),
+        Line::Ok
+    );
+    expect_resume(&mut rig);
+    assert_eq!(tracker_status(&rig), "Awake");
+    // Awake for as long as the window is open.
+    assert_eq!(driver_request(&mut rig, Duration::from_millis(900)), None);
+
+    drop(window);
+    expect_pause(&mut rig);
+}
+
+#[test]
+fn a_connected_game_keeps_the_tracker_awake() {
+    let mut rig = sleepy();
+    expect_pause(&mut rig);
+    let game = connect(rig.running.ttp_addr);
+    expect_resume(&mut rig);
+    assert_eq!(driver_request(&mut rig, Duration::from_millis(900)), None);
+    drop(game);
+    expect_pause(&mut rig);
+}
+
+#[test]
+fn a_nod_prompt_wakes_the_tracker_and_waits_for_a_head() {
+    let mut rig = sleepy();
+    expect_pause(&mut rig);
+
+    // Nobody there after waking: the question is not put.
+    let mut control = Control::connect(&rig);
+    control.send_text(r#"{"cmd":"confirm"}"#);
+    expect_resume(&mut rig);
+    assert_eq!(control.line(), confirmed(Answer::Unavailable));
+    expect_pause(&mut rig);
+
+    // Somebody there: the first pose after waking starts the prompt.
+    control.send_text(r#"{"cmd":"confirm"}"#);
+    expect_resume(&mut rig);
+    send_head(&mut rig, monotonic_micros(), 0.0, 0.0);
+    thread::sleep(Duration::from_millis(100));
+    gesture(&mut rig, true);
+    assert_eq!(control.line(), confirmed(Answer::Approved));
+}
+
+#[test]
+fn the_sleep_setting_can_be_switched_off_and_is_checked() {
+    let mut rig = sleepy();
+    expect_pause(&mut rig);
+    let mut control = Control::connect(&rig);
+    let mut tracker = Tuning::default().tracker;
+    tracker.sleep_when_idle = false;
+    assert_eq!(control.ask(&Request::SetTracker { tracker }), Line::Ok);
+    expect_resume(&mut rig);
+    assert_eq!(driver_request(&mut rig, Duration::from_millis(900)), None);
+    assert_eq!(tracker_status(&rig), "Awake: set to stay on");
+
+    tracker.idle_seconds = 1.0;
+    assert!(matches!(
+        control.ask(&Request::SetTracker { tracker }),
+        Line::Error { .. }
+    ));
+}
+
+#[test]
+fn a_refused_pause_is_asked_again_later_and_a_tracker_that_woke_is_paused_again() {
+    let mut rig = sleepy();
+    expect_pause(&mut rig);
+    // The driver says no, as it does during a calibration.
+    rig.driver
+        .write_all(&tobiid::frame(&[tobiid::TAG_REPLY, 2, 0, 0, 0, 1]))
+        .unwrap();
+    let asked = Instant::now();
+    expect_pause(&mut rig);
+    assert!(asked.elapsed() >= IDLE, "not at once");
+
+    // Poses arriving long after the pause: the tracker started by itself.
+    thread::sleep(Duration::from_millis(2200));
+    send_head(&mut rig, monotonic_micros(), 0.0, 0.0);
+    expect_pause(&mut rig);
 }

@@ -94,6 +94,7 @@ enum Command {
     Recentre(Option<String>),
     SetOverlay(Box<Overlay>),
     SetCamera(Camera),
+    SetTracker(opentobii_core::config::Tracker),
 }
 
 // --- the driver's calibration tool -------------------------------------------
@@ -702,9 +703,30 @@ impl Ui {
         self.refresh_camera();
     }
 
-    /// The face login camera card.
+    /// Switch sleeping while idle on or off.
+    fn set_tracker_sleep(&mut self, on: bool) {
+        self.config.tracker.sleep_when_idle = on;
+        let _ = self.commands.send(Command::SetTracker(self.config.tracker));
+        self.refresh_camera();
+    }
+
+    /// The face login camera card and the tracker lights card.
     fn refresh_camera(&self) {
         let app = &self.app;
+        app.set_tracker_sleeps(self.config.tracker.sleep_when_idle);
+        let tracker = if !self.connected {
+            "The daemon is not running.".to_owned()
+        } else if self.status.tracker.is_empty() {
+            "This daemon is older than this setting: restart it.".to_owned()
+        } else if self.config.tracker.sleep_when_idle {
+            format!(
+                "Sleeps after {:.0} seconds unused. Awake now, because this window is open.",
+                self.config.tracker.idle_seconds
+            )
+        } else {
+            "Stays on for as long as the daemon runs.".to_owned()
+        };
+        app.set_tracker_status(tracker.into());
         let camera = &self.config.camera;
         app.set_camera_enabled(camera.enabled);
         let status = if !self.connected {
@@ -1430,6 +1452,7 @@ fn send_commands(commands: Receiver<Command>, events: Sender<Event>) {
             Command::Recentre(game) => (Request::Recentre { game: game.clone() }, Some(game)),
             Command::SetOverlay(overlay) => (Request::SetOverlay { overlay: *overlay }, None),
             Command::SetCamera(camera) => (Request::SetCamera { camera }, None),
+            Command::SetTracker(tracker) => (Request::SetTracker { tracker }, None),
         };
         let answer = UnixStream::connect(control::socket_path())
             .map_err(|err| format!("the daemon is not running: {err}"))
@@ -1719,6 +1742,14 @@ pub fn run() -> Result<(), String> {
             ui.commit_overlay(overlay);
         }
     };
+    app.on_tracker_sleep_toggled({
+        let ui = Rc::clone(&ui);
+        move |on| {
+            if let Ok(mut ui) = ui.try_borrow_mut() {
+                ui.set_tracker_sleep(on);
+            }
+        }
+    });
     app.on_camera_toggled({
         let ui = Rc::clone(&ui);
         move |on| {

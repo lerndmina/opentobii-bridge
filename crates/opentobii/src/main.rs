@@ -511,6 +511,9 @@ fn status() -> CommandResult {
         Some(width) => println!("Display:                   {width:.0} mm wide"),
         None => println!("Display:                   not reported by the driver"),
     }
+    if !status.tracker.is_empty() {
+        println!("Tracker:                   {}", status.tracker);
+    }
     if !status.camera.is_empty() {
         println!("Face login camera:         {}", status.camera);
     }

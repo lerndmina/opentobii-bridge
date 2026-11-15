@@ -437,6 +437,8 @@ export component App inherits Window {
     in property <bool> camera-enabled;
     in property <string> camera-status;
     in property <string> nod-status;
+    in property <bool> tracker-sleeps;
+    in property <string> tracker-status;
     in property <bool> overlay-enabled;
     in property <[string]> overlay-styles;
     in-out property <int> overlay-style-index;
@@ -469,6 +471,7 @@ export component App inherits Window {
     callback game-add();
     callback game-forget(int);
     callback camera-toggled(bool);
+    callback tracker-sleep-toggled(bool);
     callback overlay-toggled(bool);
     callback overlay-style-selected(int);
     callback overlay-color-selected(int);
@@ -1117,6 +1120,24 @@ export component App inherits Window {
                         }
                         Text {
                             text: root.nod-status;
+                            color: Theme.muted;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                    }
+
+                    Card {
+                        title: "Tracker lights";
+                        hint: "Other tracker programs get no data while it sleeps.";
+                        Switch {
+                            text: "Turn the tracker off when nothing is using it";
+                            checked: root.tracker-sleeps;
+                            toggled => {
+                                root.tracker-sleep-toggled(self.checked);
+                            }
+                        }
+                        Text {
+                            text: root.tracker-status;
                             color: Theme.muted;
                             font-size: 12px;
                             wrap: word-wrap;

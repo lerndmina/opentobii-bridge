@@ -38,7 +38,50 @@ pub struct Config {
     pub camera: Camera,
     /// The nod that approves a face login.
     pub confirm: Confirm,
+    /// Whether the tracker sleeps while nothing uses it.
+    pub tracker: Tracker,
     pub updates: Updates,
+}
+
+/// When the tracker itself is switched on. Asleep, it sends nothing and its
+/// infrared lights are off; it wakes in well under a tenth of a second.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Tracker {
+    /// Put the tracker to sleep while no game, window, overlay or login
+    /// is using it.
+    pub sleep_when_idle: bool,
+    /// How long after its last use the tracker stays awake, seconds.
+    pub idle_seconds: f32,
+}
+
+impl Tracker {
+    pub const MIN_SECONDS: f32 = 5.0;
+    pub const MAX_SECONDS: f32 = 600.0;
+
+    /// # Errors
+    /// When the wait is outside 5 to 600 seconds.
+    pub fn validate(&self) -> Result<(), String> {
+        if (Self::MIN_SECONDS..=Self::MAX_SECONDS).contains(&self.idle_seconds) {
+            Ok(())
+        } else {
+            Err(format!(
+                "tracker.idle_seconds is {}: it must be from {} to {}",
+                self.idle_seconds,
+                Self::MIN_SECONDS,
+                Self::MAX_SECONDS
+            ))
+        }
+    }
+}
+
+impl Default for Tracker {
+    fn default() -> Self {
+        Self {
+            sleep_when_idle: true,
+            idle_seconds: 20.0,
+        }
+    }
 }
 
 /// The nod-to-approve prompt shown after a face match.
@@ -155,6 +198,7 @@ impl Config {
         self.overlay.validate().map_err(Error::Invalid)?;
         self.camera.validate().map_err(Error::Invalid)?;
         self.confirm.validate().map_err(Error::Invalid)?;
+        self.tracker.validate().map_err(Error::Invalid)?;
         self.default
             .validate()
             .map_err(|reason| Error::Invalid(format!("default profile: {reason}")))?;

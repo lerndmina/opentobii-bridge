@@ -17,12 +17,15 @@ use opentobii_core::control::{Answer, RawPose};
 use opentobii_proto::tobiid as driver;
 use rustix::event::{poll, PollFd, PollFlags};
 
-use super::Shared;
+use super::{power, Shared};
 
 /// How often the wait looks at the clock, the client and the banner.
 const TICK: Duration = Duration::from_millis(50);
 /// No pose for this long means the tracker is not tracking.
 const TRACKING_WINDOW: Duration = Duration::from_secs(1);
+/// How long a tracker that was asleep is given to deliver a pose with a
+/// head in it. It wakes in under a tenth of a second.
+const WAKE_WAIT: Duration = Duration::from_millis(800);
 
 /// Gives the one prompt slot back, and stops the pose feed, however the
 /// prompt ends.
@@ -120,22 +123,41 @@ pub(super) fn run(shared: &Shared, client: &UnixStream, service: Option<String>)
     let service = plain(service);
     let asked_by = service.as_deref().unwrap_or("unknown");
 
+    // The tracker may be asleep; it is awake again within a tenth of a
+    // second of this.
+    power::wake(shared);
     let (tap, poses) = mpsc::channel::<RawPose>();
-    let seconds = {
+    let (seconds, tracking, away) = {
         let mut state = shared.lock();
-        let tracking = state
-            .last_pose
-            .is_some_and(|at| at.elapsed() < TRACKING_WINDOW);
-        if !tracking || state.presence == driver::PRESENCE_AWAY {
-            drop(state);
-            shared.log(&format!(
-                "confirm: for {asked_by}: unavailable, the tracker sees nobody"
-            ));
-            return Answer::Unavailable;
-        }
         state.confirm_tap = Some(tap);
-        state.tuning.confirm.seconds
+        (
+            state.tuning.confirm.seconds,
+            state
+                .last_pose
+                .is_some_and(|at| at.elapsed() < TRACKING_WINDOW),
+            state.presence == driver::PRESENCE_AWAY,
+        )
     };
+    // Tracking already: the tracker knows whether somebody is there. Just
+    // woken: wait a moment for the first pose that holds a head.
+    let somebody = if tracking {
+        !away
+    } else {
+        let until = Instant::now() + WAKE_WAIT;
+        loop {
+            match poses.recv_timeout(until.saturating_duration_since(Instant::now())) {
+                Ok(pose) if pose.valid => break true,
+                Ok(_) => {}
+                Err(_) => break false,
+            }
+        }
+    };
+    if !somebody {
+        shared.log(&format!(
+            "confirm: for {asked_by}: unavailable, the tracker sees nobody"
+        ));
+        return Answer::Unavailable;
+    }
 
     let mut banner = if shared.config.confirm_banner {
         match Banner::start(seconds, service.as_deref()) {

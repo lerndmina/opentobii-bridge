@@ -9,6 +9,7 @@
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -119,7 +120,12 @@ fn serve(shared: &Shared, settings: &Camera) -> io::Result<()> {
             continue;
         }
         report(shared, &format!("Feeding {}", settings.device));
-        match feed(shared, settings, &mut output, &mut frame, on_demand)? {
+        // A reader is there: the tracker must be awake to have pictures.
+        shared.camera_reading.store(true, Ordering::Release);
+        super::power::wake(shared);
+        let stopped = feed(shared, settings, &mut output, &mut frame, on_demand);
+        shared.camera_reading.store(false, Ordering::Release);
+        match stopped? {
             Stopped::Settings => return Ok(()),
             Stopped::NoReaders => reading = false,
         }
